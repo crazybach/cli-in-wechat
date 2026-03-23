@@ -42,6 +42,15 @@ export class CodexAdapter implements CLIAdapter {
         // Web search
         if (settings.search) args.push('--search');
 
+        // Ephemeral
+        if (settings.ephemeral) args.push('--ephemeral');
+
+        // Profile
+        if (settings.profile) args.push('--profile', settings.profile);
+
+        // Add directory
+        if (settings.addDir) args.push('--add-dir', settings.addDir);
+
         args.push(prompt);
       }
 

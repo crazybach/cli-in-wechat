@@ -16,19 +16,33 @@ export class GeminiAdapter implements CLIAdapter {
 
   execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
-      const args = [
-        '-p', prompt,
-        '--output-format', 'json',
-        '--approval-mode', 'yolo',  // always max permissions
-      ];
+      const { settings } = opts;
+      const args = ['-p', prompt, '--output-format', 'json'];
 
-      const sid = opts.settings.sessionIds[this.name];
+      // Approval mode (default to yolo)
+      args.push('--approval-mode', settings.approvalMode || 'yolo');
+
+      // Model
+      if (settings.model) args.push('-m', settings.model);
+
+      // Include directories
+      if (settings.includeDirs) args.push('--include-directories', settings.includeDirs);
+
+      // Extensions
+      if (settings.extensions) args.push('-e', settings.extensions);
+
+      // Sandbox
+      if (settings.sandbox) args.push('--sandbox');
+
+      // Session resume
+      const sid = settings.sessionIds[this.name];
       if (sid) args.push('--resume', sid);
+
       if (opts.extraArgs) args.push(...opts.extraArgs);
 
-      log.debug(`[gemini] executing`);
+      log.debug(`[gemini] approval=${settings.approvalMode || 'yolo'} model=${settings.model || 'default'}`);
       const proc = spawn(this.command, args, {
-        cwd: opts.workDir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env },
+        cwd: settings.workDir || opts.workDir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env },
       });
 
       setupAbort(proc, opts.signal);

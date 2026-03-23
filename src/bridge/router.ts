@@ -135,28 +135,42 @@ export class Router {
       case 'help': case 'h':
         await reply([
           '— 通用 —',
-          '/status  查看配置',
-          '/new  新会话',
-          '/cancel  取消任务',
+          '/status  查看所有配置',
+          '/new  新会话(清除所有工具session)',
+          '/cancel  取消当前任务',
           '/model <名>  切模型 (reset=默认)',
           '/mode <auto|safe|plan>  权限模式',
           '/dir <路径>  切换工作目录',
-          '/system <提示>  追加系统提示',
+          '/system <提示>  追加系统提示词',
+          '/reset  重置所有设置为默认',
+          '/yolo  快捷: mode=auto + effort=max',
           '',
           '— Claude Code —',
-          '/effort <low|med|high|max>',
-          '/turns <数字>  最大轮次',
-          '/budget <美元>  预算 (off=无限)',
-          '/tools <工具列表>  允许工具',
-          '/notool <工具>  禁止工具',
+          '/effort <low|med|high|max>  思考深度',
+          '/fast  快捷: effort=low',
+          '/turns <数字>  最大agent轮次',
+          '/budget <美元>  API预算 (off=无限)',
+          '/tools <列表>  允许的工具(逗号分隔)',
+          '/notool <列表>  禁用的工具',
           '/verbose  切换详细输出',
+          '/bare  切换bare模式(跳过配置加载)',
+          '/adddir <路径>  添加额外目录访问',
+          '/name <名>  会话命名',
           '',
           '— Codex —',
-          '/sandbox <read-only|workspace-write|full>',
+          '/sandbox <ro|write|full|off>  沙箱',
           '/search  切换web搜索',
+          '/ephemeral  切换临时模式(不存session)',
+          '/profile <名>  加载配置profile',
           '',
           '— Gemini —',
-          '(用 /mode 控制 approval-mode)',
+          '/approval <default|auto_edit|yolo|plan>',
+          '/include <目录>  添加上下文目录',
+          '/ext <名|none>  指定extensions',
+          '',
+          '— 工具切换 —',
+          '/cc /cx /gm /ai  快速切换',
+          '@claude @codex @gemini  指定工具发消息',
           '',
           '— 接力 —',
           '>> <消息>  传上条结果给当前工具',
@@ -323,8 +337,98 @@ export class Router {
         await reply(`search → ${!settings.search ? 'ON' : 'OFF'}`);
         return true;
 
+      case 'ephemeral':
+        this.sessions.update(uid, { ephemeral: !settings.ephemeral });
+        await reply(`ephemeral → ${!settings.ephemeral ? 'ON' : 'OFF'}`);
+        return true;
+
+      case 'profile':
+        if (!arg) { await reply(`当前: ${settings.profile || '无'}\n/profile <名称> 或 /profile reset`); return true; }
+        this.sessions.update(uid, { profile: arg === 'reset' ? '' : arg });
+        await reply(arg === 'reset' ? 'profile → 默认' : `profile → ${arg}`);
+        return true;
+
       // ═══════════════════════════════════════════
-      // 工具切换快捷
+      // Gemini
+      // ═══════════════════════════════════════════
+
+      case 'approval': {
+        const modes: Record<string, string> = { default: 'default', auto_edit: 'auto_edit', yolo: 'yolo', plan: 'plan' };
+        const v = modes[arg.toLowerCase()];
+        if (!v) { await reply(`当前: ${settings.approvalMode || 'yolo'}\n/approval <default|auto_edit|yolo|plan>`); return true; }
+        this.sessions.update(uid, { approvalMode: v });
+        await reply(`approval-mode → ${v}`);
+        return true;
+      }
+
+      case 'include': case 'inc':
+        if (!arg || arg === 'reset') {
+          this.sessions.update(uid, { includeDirs: '' });
+          await reply('include dirs → 清除');
+        } else {
+          this.sessions.update(uid, { includeDirs: arg });
+          await reply(`include dirs → ${arg}`);
+        }
+        return true;
+
+      case 'ext': case 'extensions':
+        if (!arg || arg === 'reset') {
+          this.sessions.update(uid, { extensions: '' });
+          await reply('extensions → 默认');
+        } else {
+          this.sessions.update(uid, { extensions: arg });
+          await reply(`extensions → ${arg}`);
+        }
+        return true;
+
+      // ═══════════════════════════════════════════
+      // 快捷组合
+      // ═══════════════════════════════════════════
+
+      case 'yolo':
+        this.sessions.update(uid, { mode: 'auto', effort: 'max' } as any);
+        await reply('YOLO: mode=auto + effort=max');
+        return true;
+
+      case 'fast':
+        this.sessions.update(uid, { effort: 'low' });
+        await reply('effort → low (快速模式)');
+        return true;
+
+      case 'reset':
+        this.sessions.update(uid, {
+          mode: 'auto', effort: 'high', model: '', maxTurns: 30, maxBudget: 0,
+          allowedTools: '', disallowedTools: '', verbose: false, sandbox: '',
+          search: false, systemPrompt: '', workDir: '', bare: false, addDir: '',
+          sessionName: '', ephemeral: false, profile: '', approvalMode: '',
+          includeDirs: '', extensions: '',
+        } as any);
+        await reply('所有设置已重置');
+        return true;
+
+      // ═══════════════════════════════════════════
+      // Claude 额外
+      // ═══════════════════════════════════════════
+
+      case 'bare':
+        this.sessions.update(uid, { bare: !settings.bare } as any);
+        await reply(`bare → ${!(settings as any).bare ? 'ON (跳过配置加载)' : 'OFF'}`);
+        return true;
+
+      case 'adddir': case 'add-dir':
+        if (!arg) { await reply(`当前: ${(settings as any).addDir || '无'}\n/adddir <路径>`); return true; }
+        this.sessions.update(uid, { addDir: arg } as any);
+        await reply(`add-dir → ${arg}`);
+        return true;
+
+      case 'name':
+        if (!arg) { await reply(`当前: ${(settings as any).sessionName || '无'}\n/name <名称>`); return true; }
+        this.sessions.update(uid, { sessionName: arg } as any);
+        await reply(`session name → ${arg}`);
+        return true;
+
+      // ═══════════════════════════════════════════
+      // 工具切换
       // ═══════════════════════════════════════════
 
       case 'claude': case 'cc':
@@ -337,7 +441,7 @@ export class Router {
         this.sessions.update(uid, { defaultTool: 'aider' }); await reply('→ aider'); return true;
 
       // ═══════════════════════════════════════════
-      // 未识别 → 告知用户
+      // 未识别
       // ═══════════════════════════════════════════
 
       default:

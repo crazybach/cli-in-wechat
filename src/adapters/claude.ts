@@ -47,6 +47,15 @@ export class ClaudeAdapter implements CLIAdapter {
       // Verbose
       if (settings.verbose) args.push('--verbose');
 
+      // Bare
+      if (settings.bare) args.push('--bare');
+
+      // Add directory
+      if (settings.addDir) args.push('--add-dir', settings.addDir);
+
+      // Session name
+      if (settings.sessionName) args.push('--name', settings.sessionName);
+
       // Session resume
       const sid = settings.sessionIds[this.name];
       if (sid) args.push('--resume', sid);

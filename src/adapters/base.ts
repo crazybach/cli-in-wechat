@@ -3,25 +3,33 @@ export type ToolMode = 'auto' | 'safe' | 'plan';
 export interface UserSettings {
   // ── Universal ──
   defaultTool: string;
-  mode: ToolMode;          // auto=最高权限, safe=需确认, plan=只读
-  model: string;           // --model
+  mode: ToolMode;
+  model: string;
   sessionIds: Record<string, string>;
-  systemPrompt: string;    // --append-system-prompt (Claude)
+  systemPrompt: string;
+  workDir: string;
 
   // ── Claude Code ──
-  effort: string;          // --effort low|medium|high|max
-  maxTurns: number;        // --max-turns
-  maxBudget: number;       // --max-budget-usd, 0=unlimited
-  allowedTools: string;    // --allowedTools "Bash,Read,Edit"
-  disallowedTools: string; // --disallowedTools
-  verbose: boolean;        // --verbose
+  effort: string;
+  maxTurns: number;
+  maxBudget: number;
+  allowedTools: string;
+  disallowedTools: string;
+  verbose: boolean;
+  bare: boolean;
+  addDir: string;
+  sessionName: string;
 
   // ── Codex ──
-  sandbox: string;         // --sandbox read-only|workspace-write|danger-full-access
-  search: boolean;         // --search (web search)
+  sandbox: string;
+  search: boolean;
+  ephemeral: boolean;
+  profile: string;
 
-  // ── Working directory ──
-  workDir: string;         // override per-user working directory
+  // ── Gemini ──
+  approvalMode: string;
+  includeDirs: string;
+  extensions: string;
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -30,15 +38,23 @@ export const DEFAULT_SETTINGS: UserSettings = {
   model: '',
   sessionIds: {},
   systemPrompt: '',
+  workDir: '',
   effort: 'high',
   maxTurns: 30,
   maxBudget: 0,
   allowedTools: '',
   disallowedTools: '',
   verbose: false,
+  bare: false,
+  addDir: '',
+  sessionName: '',
   sandbox: '',
   search: false,
-  workDir: '',
+  ephemeral: false,
+  profile: '',
+  approvalMode: '',
+  includeDirs: '',
+  extensions: '',
 };
 
 export interface ExecOptions {
