@@ -8,30 +8,60 @@ export class GeminiAdapter implements CLIAdapter {
   readonly displayName = 'Gemini CLI';
   readonly command = 'gemini';
   readonly capabilities: AdapterCapabilities = {
-    streaming: false,
+    streaming: true,
     jsonOutput: true,
-    sessionResume: false,
+    sessionResume: true,        // supports --resume
+    modes: ['auto', 'safe', 'plan'],
+    hasEffort: false,
+    hasModel: true,
+    hasSearch: false,
+    hasBudget: false,
   };
 
   async isAvailable(): Promise<boolean> {
     return commandExists(this.command);
   }
 
-  execute(prompt: string, opts?: ExecOptions): Promise<ExecResult> {
+  execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
+      const { settings } = opts;
       const args = ['-p', prompt, '--output-format', 'json'];
-      if (opts?.extraArgs) args.push(...opts.extraArgs);
 
-      log.debug(`[gemini] ${this.command} -p "${prompt.substring(0, 40)}..."`);
+      // ── Mode (--approval-mode) ──
+      // auto:  yolo (auto-approve all tool calls)
+      // safe:  default (prompt for each)
+      // plan:  plan (read-only, no execution)
+      switch (settings.mode) {
+        case 'auto':
+          args.push('--approval-mode', 'yolo');
+          break;
+        case 'safe':
+          args.push('--approval-mode', 'default');
+          break;
+        case 'plan':
+          args.push('--approval-mode', 'plan');
+          break;
+      }
+
+      // ── Model ──
+      if (settings.model) args.push('-m', settings.model);
+
+      // ── Session resume ──
+      const sid = settings.sessionIds[this.name];
+      if (sid) args.push('--resume', sid);
+
+      if (opts.extraArgs) args.push(...opts.extraArgs);
+
+      log.debug(`[gemini] mode=${settings.mode} model=${settings.model || 'default'}`);
 
       const proc = spawn(this.command, args, {
-        cwd: opts?.workDir,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: opts.workDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env },
       });
 
-      setupAbort(proc, opts?.signal);
-      const timer = setupTimeout(proc, opts?.timeout);
+      setupAbort(proc, opts.signal);
+      const timer = setupTimeout(proc, opts.timeout);
 
       let stdout = '';
       let stderr = '';
@@ -40,25 +70,18 @@ export class GeminiAdapter implements CLIAdapter {
 
       proc.on('close', (code) => {
         if (timer) clearTimeout(timer);
-
-        if (opts?.signal?.aborted) {
-          resolve({ text: '已取消', error: true });
-          return;
-        }
-
+        if (opts.signal?.aborted) { resolve({ text: '已取消', error: true }); return; }
         try {
-          const result = JSON.parse(stdout);
+          const r = JSON.parse(stdout);
+          // Extract session ID from Gemini's JSON output if available
           resolve({
-            text: result.response || result.result || stdout.trim(),
-            duration: result.stats?.duration_ms,
-            error: !!result.error,
+            text: r.response || r.result || stdout.trim(),
+            sessionId: r.sessionId || r.session_id,
+            duration: r.stats?.duration_ms,
+            error: !!r.error,
           });
         } catch {
-          const output = stripAnsi(stdout.trim() || stderr.trim());
-          resolve({
-            text: output || `退出码 ${code}`,
-            error: code !== 0,
-          });
+          resolve({ text: stripAnsi(stdout.trim() || stderr.trim()) || `exit ${code}`, error: code !== 0 });
         }
       });
 

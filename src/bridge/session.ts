@@ -1,68 +1,46 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSessionsDir } from '../config.js';
-
-interface SessionState {
-  userId: string;
-  tool: string;
-  sessionId?: string;
-  defaultTool: string;
-  lastActive: number;
-}
+import { DEFAULT_SETTINGS, type UserSettings } from '../adapters/base.js';
 
 export class SessionManager {
-  private sessions = new Map<string, SessionState>();
+  private data = new Map<string, UserSettings>();
 
   constructor() {
     this.load();
   }
 
-  getState(userId: string): SessionState {
-    let state = this.sessions.get(userId);
-    if (!state) {
-      state = {
-        userId,
-        tool: '',
-        defaultTool: '',
-        lastActive: Date.now(),
-      };
-      this.sessions.set(userId, state);
+  get(userId: string): UserSettings {
+    let s = this.data.get(userId);
+    if (!s) {
+      s = { ...DEFAULT_SETTINGS, sessionIds: {} };
+      this.data.set(userId, s);
     }
-    return state;
+    return s;
   }
 
-  setDefaultTool(userId: string, tool: string): void {
-    const state = this.getState(userId);
-    state.defaultTool = tool;
+  update(userId: string, partial: Partial<UserSettings>): UserSettings {
+    const s = this.get(userId);
+    Object.assign(s, partial);
+    this.save();
+    return s;
+  }
+
+  setSession(userId: string, tool: string, sessionId: string): void {
+    const s = this.get(userId);
+    s.sessionIds[tool] = sessionId;
     this.save();
   }
 
-  getDefaultTool(userId: string): string {
-    return this.getState(userId).defaultTool;
-  }
-
-  setSessionId(userId: string, tool: string, sessionId: string): void {
-    const state = this.getState(userId);
-    state.tool = tool;
-    state.sessionId = sessionId;
-    state.lastActive = Date.now();
+  clearSession(userId: string, tool?: string): void {
+    const s = this.get(userId);
+    if (tool) {
+      delete s.sessionIds[tool];
+    } else {
+      s.sessionIds = {};
+    }
     this.save();
   }
-
-  getSessionId(userId: string, tool: string): string | undefined {
-    const state = this.getState(userId);
-    if (state.tool === tool) return state.sessionId;
-    return undefined;
-  }
-
-  clearSession(userId: string): void {
-    const state = this.getState(userId);
-    state.sessionId = undefined;
-    state.tool = '';
-    this.save();
-  }
-
-  // ─── Persistence ───────────────────────────────────────
 
   private filePath(): string {
     return join(getSessionsDir(), 'sessions.json');
@@ -74,24 +52,16 @@ export class SessionManager {
     try {
       const raw = JSON.parse(readFileSync(p, 'utf-8'));
       for (const [key, val] of Object.entries(raw)) {
-        this.sessions.set(key, val as SessionState);
+        this.data.set(key, { ...DEFAULT_SETTINGS, sessionIds: {}, ...(val as object) });
       }
-    } catch {
-      // corrupted file, start fresh
-    }
+    } catch { /* start fresh */ }
   }
 
   private save(): void {
-    const data: Record<string, SessionState> = {};
-    for (const [key, val] of this.sessions) {
-      data[key] = val;
-    }
+    const out: Record<string, UserSettings> = {};
+    for (const [k, v] of this.data) out[k] = v;
     try {
-      writeFileSync(this.filePath(), JSON.stringify(data, null, 2), {
-        mode: 0o600,
-      });
-    } catch {
-      // ignore write errors
-    }
+      writeFileSync(this.filePath(), JSON.stringify(out, null, 2), { mode: 0o600 });
+    } catch { /* ignore */ }
   }
 }

@@ -54,16 +54,18 @@ async function main() {
   if (!credentials) {
     log.info('需要登录微信 ClawBot...');
 
-    let qrcodeTerminal: typeof import('qrcode-terminal') | null = null;
+    let qrGenerate: ((text: string, opts: { small: boolean }) => void) | null = null;
     try {
-      qrcodeTerminal = await import('qrcode-terminal');
+      const mod = await import('qrcode-terminal');
+      const qt = mod.default || mod;
+      qrGenerate = qt.generate?.bind(qt) ?? null;
     } catch {
       // fallback to URL display
     }
 
     credentials = await login((qrContent) => {
-      if (qrcodeTerminal) {
-        qrcodeTerminal.generate(qrContent, { small: true });
+      if (qrGenerate) {
+        qrGenerate(qrContent, { small: true });
       } else {
         log.info(`请用微信扫描二维码: ${qrContent}`);
       }

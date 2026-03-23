@@ -10,38 +10,70 @@ export class ClaudeAdapter implements CLIAdapter {
     streaming: true,
     jsonOutput: true,
     sessionResume: true,
+    modes: ['auto', 'safe', 'plan'],
+    hasEffort: true,
+    hasModel: true,
+    hasSearch: false,
+    hasBudget: true,
   };
 
   async isAvailable(): Promise<boolean> {
     return commandExists(this.command);
   }
 
-  execute(prompt: string, opts?: ExecOptions): Promise<ExecResult> {
+  execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
-      const args = [
-        '-p', prompt,
-        '--output-format', 'json',
-        '--bare',
-        '--max-turns', '30',
-      ];
+      const { settings } = opts;
+      const args = ['-p', prompt, '--output-format', 'json'];
 
-      if (opts?.sessionId) {
-        args.push('--resume', opts.sessionId);
-      }
-      if (opts?.extraArgs) {
-        args.push(...opts.extraArgs);
+      // ── Mode ──
+      switch (settings.mode) {
+        case 'auto':
+          args.push('--dangerously-skip-permissions');
+          break;
+        case 'plan':
+          args.push('--permission-mode', 'plan');
+          break;
+        case 'safe':
+          break; // default permissions
       }
 
-      log.debug(`[claude] ${this.command} -p "${prompt.substring(0, 40)}..."`);
+      // ── Effort (native --effort flag) ──
+      if (settings.effort !== 'min') {
+        // claude --effort accepts: low, medium, high, max
+        const effortMap: Record<string, string> = {
+          min: 'low', low: 'low', medium: 'medium', high: 'high', max: 'max',
+        };
+        args.push('--effort', effortMap[settings.effort]);
+      } else {
+        args.push('--effort', 'low');
+      }
+
+      // ── Max turns ──
+      args.push('--max-turns', String(settings.maxTurns));
+
+      // ── Model ──
+      if (settings.model) args.push('--model', settings.model);
+
+      // ── Budget ──
+      if (settings.maxBudget > 0) args.push('--max-budget-usd', String(settings.maxBudget));
+
+      // ── Session resume ──
+      const sid = settings.sessionIds[this.name];
+      if (sid) args.push('--resume', sid);
+
+      if (opts.extraArgs) args.push(...opts.extraArgs);
+
+      log.debug(`[claude] mode=${settings.mode} effort=${settings.effort} turns=${settings.maxTurns}`);
 
       const proc = spawn(this.command, args, {
-        cwd: opts?.workDir,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: opts.workDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env },
       });
 
-      setupAbort(proc, opts?.signal);
-      const timer = setupTimeout(proc, opts?.timeout);
+      setupAbort(proc, opts.signal);
+      const timer = setupTimeout(proc, opts.timeout);
 
       let stdout = '';
       let stderr = '';
@@ -50,27 +82,18 @@ export class ClaudeAdapter implements CLIAdapter {
 
       proc.on('close', (code) => {
         if (timer) clearTimeout(timer);
-
-        if (opts?.signal?.aborted) {
-          resolve({ text: '已取消', error: true });
-          return;
-        }
-
+        if (opts.signal?.aborted) { resolve({ text: '已取消', error: true }); return; }
         try {
-          const result = JSON.parse(stdout);
+          const r = JSON.parse(stdout);
           resolve({
-            text: result.result || '(无输出)',
-            sessionId: result.session_id,
-            cost: result.total_cost_usd,
-            duration: result.duration_ms,
-            error: result.is_error || result.subtype !== 'success',
+            text: r.result || '(无输出)',
+            sessionId: r.session_id,
+            cost: r.total_cost_usd,
+            duration: r.duration_ms,
+            error: r.is_error || r.subtype !== 'success',
           });
         } catch {
-          const output = stdout.trim() || stderr.trim();
-          resolve({
-            text: output || `退出码 ${code}`,
-            error: code !== 0,
-          });
+          resolve({ text: stdout.trim() || stderr.trim() || `exit ${code}`, error: code !== 0 });
         }
       });
 
@@ -82,7 +105,7 @@ export class ClaudeAdapter implements CLIAdapter {
   }
 }
 
-// ─── Shared helpers ────────────────────────────────────────
+// ─── Shared helpers (used by all adapters) ─────────────────
 
 export function commandExists(cmd: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -92,31 +115,19 @@ export function commandExists(cmd: string): Promise<boolean> {
   });
 }
 
-export function setupAbort(
-  proc: ChildProcess,
-  signal?: AbortSignal,
-): void {
+export function setupAbort(proc: ChildProcess, signal?: AbortSignal): void {
   if (!signal) return;
-  if (signal.aborted) {
-    proc.kill('SIGTERM');
-    return;
-  }
+  if (signal.aborted) { proc.kill('SIGTERM'); return; }
   const onAbort = () => proc.kill('SIGTERM');
   signal.addEventListener('abort', onAbort, { once: true });
   proc.on('close', () => signal.removeEventListener('abort', onAbort));
 }
 
-export function setupTimeout(
-  proc: ChildProcess,
-  timeout?: number,
-): ReturnType<typeof setTimeout> | null {
+export function setupTimeout(proc: ChildProcess, timeout?: number): ReturnType<typeof setTimeout> | null {
   if (!timeout) return null;
   return setTimeout(() => proc.kill('SIGTERM'), timeout);
 }
 
 export function stripAnsi(str: string): string {
-  return str
-    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/\x1B\][^\x07]*\x07/g, '')
-    .replace(/\r/g, '');
+  return str.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '').replace(/\x1B\][^\x07]*\x07/g, '').replace(/\r/g, '');
 }

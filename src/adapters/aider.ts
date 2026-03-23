@@ -11,34 +11,47 @@ export class AiderAdapter implements CLIAdapter {
     streaming: false,
     jsonOutput: false,
     sessionResume: false,
+    modes: ['auto', 'safe'],
+    hasEffort: false,
+    hasModel: true,
+    hasSearch: false,
+    hasBudget: false,
   };
 
   async isAvailable(): Promise<boolean> {
     return commandExists(this.command);
   }
 
-  execute(prompt: string, opts?: ExecOptions): Promise<ExecResult> {
+  execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
-      const args = [
-        '--yes-always',
-        '--no-pretty',
-        '--no-stream',
-        '--no-auto-commits',
-        '-m', prompt,
-      ];
+      const { settings } = opts;
+      const args = ['--no-pretty', '--no-stream', '--no-auto-commits'];
 
-      if (opts?.extraArgs) args.push(...opts.extraArgs);
+      switch (settings.mode) {
+        case 'auto':
+          args.push('--yes-always');
+          break;
+        case 'safe':
+        case 'plan':
+          args.push('--dry-run');
+          break;
+      }
 
-      log.debug(`[aider] ${this.command} -m "${prompt.substring(0, 40)}..."`);
+      if (settings.model) args.push('--model', settings.model);
+
+      args.push('-m', prompt);
+      if (opts.extraArgs) args.push(...opts.extraArgs);
+
+      log.debug(`[aider] mode=${settings.mode}`);
 
       const proc = spawn(this.command, args, {
-        cwd: opts?.workDir,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: opts.workDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env },
       });
 
-      setupAbort(proc, opts?.signal);
-      const timer = setupTimeout(proc, opts?.timeout);
+      setupAbort(proc, opts.signal);
+      const timer = setupTimeout(proc, opts.timeout);
 
       let stdout = '';
       let stderr = '';
@@ -47,17 +60,8 @@ export class AiderAdapter implements CLIAdapter {
 
       proc.on('close', (code) => {
         if (timer) clearTimeout(timer);
-
-        if (opts?.signal?.aborted) {
-          resolve({ text: '已取消', error: true });
-          return;
-        }
-
-        const output = stripAnsi(stdout.trim() || stderr.trim());
-        resolve({
-          text: output || `退出码 ${code}`,
-          error: code !== 0,
-        });
+        if (opts.signal?.aborted) { resolve({ text: '已取消', error: true }); return; }
+        resolve({ text: stripAnsi(stdout.trim() || stderr.trim()) || `exit ${code}`, error: code !== 0 });
       });
 
       proc.on('error', (err) => {

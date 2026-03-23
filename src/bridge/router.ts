@@ -5,33 +5,41 @@ import { SessionManager } from './session.js';
 import { formatResponse } from './formatter.js';
 import type { WeixinMessage } from '../ilink/types.js';
 import type { BridgeConfig } from '../config.js';
+import type { ToolMode, EffortLevel } from '../adapters/base.js';
 
-interface ParsedMessage {
-  type: 'command' | 'chat';
-  command?: string;
-  args?: string;
-  tool?: string;
-  prompt?: string;
-}
+interface ActiveTask { abort: AbortController; tool: string }
 
-interface ActiveTask {
-  abort: AbortController;
-  tool: string;
-}
+// ─── Lookup tables ───────────────────────────────────────────
+
+const TOOL_ALIASES: Record<string, string> = {
+  cc: 'claude', claude: 'claude', c: 'claude',
+  cx: 'codex', codex: 'codex', x: 'codex',
+  gm: 'gemini', gemini: 'gemini', g: 'gemini',
+  ai: 'aider', aider: 'aider',
+};
+
+const MODES: Record<string, ToolMode> = {
+  auto: 'auto', a: 'auto',
+  safe: 'safe', s: 'safe',
+  plan: 'plan', p: 'plan',
+};
+
+const EFFORTS: Record<string, EffortLevel> = {
+  min: 'min', '1': 'min',
+  low: 'low', '2': 'low',
+  medium: 'medium', med: 'medium', '3': 'medium',
+  high: 'high', '4': 'high',
+  max: 'max', '5': 'max',
+};
 
 export class Router {
   private ilink: ILinkClient;
   private registry: AdapterRegistry;
   private sessions: SessionManager;
   private config: BridgeConfig;
-  private activeTasks = new Map<string, ActiveTask>();
+  private active = new Map<string, ActiveTask>();
 
-  constructor(
-    ilink: ILinkClient,
-    registry: AdapterRegistry,
-    sessions: SessionManager,
-    config: BridgeConfig,
-  ) {
+  constructor(ilink: ILinkClient, registry: AdapterRegistry, sessions: SessionManager, config: BridgeConfig) {
     this.ilink = ilink;
     this.registry = registry;
     this.sessions = sessions;
@@ -40,261 +48,303 @@ export class Router {
 
   start(): void {
     this.ilink.onMessage((msg, text) => {
-      this.handleMessage(msg, text).catch((err) => {
-        log.error('路由处理异常:', err);
-      });
+      this.handle(msg, text).catch((e) => log.error('路由异常:', e));
     });
   }
 
-  // ─── Message parsing ───────────────────────────────────
+  // ─── Entry ─────────────────────────────────────────────
 
-  private parse(text: string): ParsedMessage {
+  private async handle(msg: WeixinMessage, text: string): Promise<void> {
+    const uid = msg.from_user_id;
+    if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(uid)) return;
+
     const trimmed = text.trim();
 
     // /command
     if (trimmed.startsWith('/')) {
-      const spaceIdx = trimmed.indexOf(' ');
-      const command =
-        spaceIdx === -1
-          ? trimmed.substring(1)
-          : trimmed.substring(1, spaceIdx);
-      const args =
-        spaceIdx === -1 ? '' : trimmed.substring(spaceIdx + 1).trim();
-      return { type: 'command', command: command.toLowerCase(), args };
+      const si = trimmed.indexOf(' ');
+      const cmd = (si === -1 ? trimmed.substring(1) : trimmed.substring(1, si)).toLowerCase();
+      const args = si === -1 ? '' : trimmed.substring(si + 1).trim();
+      await this.command(uid, cmd, args);
+      return;
     }
 
     // @tool prefix
-    const atMatch = trimmed.match(/^@(\w+)\s+([\s\S]+)$/);
-    if (atMatch) {
-      const tool = atMatch[1].toLowerCase();
-      if (this.registry.get(tool)) {
-        return { type: 'chat', tool, prompt: atMatch[2].trim() };
-      }
+    let tool: string | undefined;
+    let prompt = trimmed;
+    const m = trimmed.match(/^@(\w+)\s+([\s\S]+)$/);
+    if (m) {
+      const resolved = TOOL_ALIASES[m[1].toLowerCase()];
+      if (resolved && this.registry.get(resolved)) { tool = resolved; prompt = m[2].trim(); }
     }
 
-    // Plain text → default tool
-    return { type: 'chat', prompt: trimmed };
-  }
-
-  // ─── Message handler ───────────────────────────────────
-
-  private async handleMessage(
-    msg: WeixinMessage,
-    text: string,
-  ): Promise<void> {
-    const userId = msg.from_user_id;
-
-    // Access control
-    if (
-      this.config.allowedUsers.length > 0 &&
-      !this.config.allowedUsers.includes(userId)
-    ) {
-      log.warn(`拒绝未授权用户: ${userId}`);
+    // Busy
+    if (this.active.has(uid)) {
+      await this.ilink.sendText(uid, '处理中... /cancel 取消');
       return;
     }
 
-    const parsed = this.parse(text);
+    const settings = this.sessions.get(uid);
+    const toolName = tool || settings.defaultTool || this.config.defaultTool;
 
-    if (parsed.type === 'command') {
-      await this.handleCommand(userId, parsed.command!, parsed.args || '');
+    if (!this.registry.isAvailable(toolName)) {
+      await this.ilink.sendText(uid, `"${toolName}" 不可用\n/tools 查看可用`);
       return;
     }
 
-    // Busy check
-    if (this.activeTasks.has(userId)) {
-      await this.ilink.sendText(
-        userId,
-        '上一个请求还在处理中...\n发送 /cancel 可取消',
-      );
-      return;
-    }
-
-    const tool =
-      parsed.tool ||
-      this.sessions.getDefaultTool(userId) ||
-      this.config.defaultTool;
-    const prompt = parsed.prompt || text;
-
-    if (!this.registry.isAvailable(tool)) {
-      const available = this.registry.getAvailableNames().join(', ');
-      await this.ilink.sendText(
-        userId,
-        `工具 "${tool}" 不可用\n可用: ${available}`,
-      );
-      return;
-    }
-
-    await this.executeAndReply(userId, tool, prompt);
+    await this.exec(uid, toolName, prompt);
   }
 
   // ─── Commands ──────────────────────────────────────────
 
-  private async handleCommand(
-    userId: string,
-    command: string,
-    args: string,
-  ): Promise<void> {
-    switch (command) {
-      case 'help':
-      case 'h': {
-        const available = this.registry.getAvailableNames();
-        const def =
-          this.sessions.getDefaultTool(userId) || this.config.defaultTool;
-        await this.ilink.sendText(
-          userId,
-          [
-            'WX AI Bridge',
-            '',
-            '直接输入文字 → 发送给默认工具',
-            '@claude <消息> → Claude Code',
-            '@codex <消息> → Codex CLI',
-            '@gemini <消息> → Gemini CLI',
-            '@aider <消息> → Aider',
-            '',
-            '/switch <工具> — 切换默认工具',
-            '/tools — 查看可用工具',
-            '/status — 当前状态',
-            '/new — 新会话',
-            '/cancel — 取消当前任务',
-            '/help — 帮助',
-            '',
-            `默认: ${def} | 可用: ${available.join(', ')}`,
-          ].join('\n'),
-        );
+  private async command(uid: string, cmd: string, args: string): Promise<void> {
+    const settings = this.sessions.get(uid);
+
+    // ── Tool shortcuts: /cc /cx /gm /ai ──
+    const toolAlias = TOOL_ALIASES[cmd];
+    if (toolAlias && !['c'].includes(cmd)) { // /c is cancel, not claude
+      if (!this.registry.isAvailable(toolAlias)) {
+        await this.ilink.sendText(uid, `${toolAlias} 未安装`);
+        return;
+      }
+      this.sessions.update(uid, { defaultTool: toolAlias });
+      await this.ilink.sendText(uid, `→ ${toolAlias}`);
+      return;
+    }
+
+    switch (cmd) {
+      // ─── Mode ───
+      case 'auto': case 'safe': case 'plan': {
+        const mode = MODES[cmd]!;
+        this.sessions.update(uid, { mode });
+        const desc: Record<ToolMode, string> = {
+          auto: 'AUTO — 全自动\nClaude: --dangerously-skip-permissions\nCodex: --yolo\nGemini: --approval-mode yolo',
+          safe: 'SAFE — 需确认\nClaude: default permissions\nCodex: --sandbox read-only\nGemini: --approval-mode default',
+          plan: 'PLAN — 只读规划\nClaude: --permission-mode plan\nCodex: --sandbox read-only\nGemini: --approval-mode plan',
+        };
+        await this.ilink.sendText(uid, desc[mode]);
         break;
       }
 
-      case 'switch':
-      case 'sw': {
-        const tool = args.toLowerCase().trim();
-        if (!tool) {
-          await this.ilink.sendText(userId, '用法: /switch claude');
+      // ─── Effort ───
+      case 'effort': case 'e': {
+        const level = EFFORTS[args.toLowerCase()];
+        if (!level) {
+          await this.ilink.sendText(uid, `当前: ${settings.effort}\n/effort <min|low|med|high|max> 或 /e 1-5`);
           return;
         }
-        if (!this.registry.isAvailable(tool)) {
-          const available = this.registry.getAvailableNames().join(', ');
-          await this.ilink.sendText(
-            userId,
-            `"${tool}" 不可用\n可用: ${available}`,
-          );
+        this.sessions.update(uid, { effort: level });
+        await this.ilink.sendText(uid, `effort → ${level}\n(Claude: --effort ${level === 'min' ? 'low' : level})`);
+        break;
+      }
+
+      // ─── Model ───
+      case 'model': case 'm': {
+        if (!args) {
+          await this.ilink.sendText(uid, [
+            `当前: ${settings.model || '默认'}`,
+            '',
+            'Claude: sonnet, opus, claude-sonnet-4-6...',
+            'Codex: o3, gpt-5-codex...',
+            'Gemini: gemini-2.5-flash, gemini-3-pro...',
+            '',
+            '/model <名称> | /model reset',
+          ].join('\n'));
           return;
         }
-        this.sessions.setDefaultTool(userId, tool);
-        await this.ilink.sendText(userId, `已切换默认工具: ${tool}`);
+        if (args === 'reset' || args === 'default') {
+          this.sessions.update(uid, { model: '' });
+          await this.ilink.sendText(uid, 'model → 默认');
+        } else {
+          this.sessions.update(uid, { model: args });
+          await this.ilink.sendText(uid, `model → ${args}`);
+        }
         break;
       }
 
-      case 'tools': {
-        const lines = this.registry.getAll().map((a) => {
-          const ok = this.registry.isAvailable(a.name) ? '●' : '○';
-          return `${ok} ${a.displayName} (${a.name})`;
-        });
-        await this.ilink.sendText(userId, lines.join('\n'));
+      // ─── Turns ───
+      case 'turns': case 't': {
+        const n = parseInt(args);
+        if (!n || n < 1 || n > 200) {
+          await this.ilink.sendText(uid, `当前: ${settings.maxTurns}\n/turns <1-200>`);
+          return;
+        }
+        this.sessions.update(uid, { maxTurns: n });
+        await this.ilink.sendText(uid, `turns → ${n}`);
         break;
       }
 
-      case 'status': {
-        const def =
-          this.sessions.getDefaultTool(userId) || this.config.defaultTool;
-        const state = this.sessions.getState(userId);
-        const busy = this.activeTasks.get(userId);
-        await this.ilink.sendText(
-          userId,
-          [
-            `默认工具: ${def}`,
-            `当前会话: ${state.tool || '无'} ${state.sessionId ? `(${state.sessionId.substring(0, 8)}...)` : ''}`,
-            `处理中: ${busy ? `${busy.tool} 运行中` : '空闲'}`,
-          ].join('\n'),
-        );
+      // ─── Budget (Claude) ───
+      case 'budget': case 'b': {
+        const v = parseFloat(args);
+        if (args === 'off' || args === '0') {
+          this.sessions.update(uid, { maxBudget: 0 });
+          await this.ilink.sendText(uid, 'budget → 无限制');
+        } else if (!isNaN(v) && v > 0) {
+          this.sessions.update(uid, { maxBudget: v });
+          await this.ilink.sendText(uid, `budget → $${v}\n(Claude: --max-budget-usd ${v})`);
+        } else {
+          await this.ilink.sendText(uid, `当前: ${settings.maxBudget > 0 ? '$' + settings.maxBudget : '无限制'}\n/budget <美元> | /budget off`);
+        }
         break;
       }
 
-      case 'new': {
-        this.sessions.clearSession(userId);
-        await this.ilink.sendText(userId, '已开始新会话');
+      // ─── Search (Codex) ───
+      case 'search': {
+        const on = !settings.search;
+        this.sessions.update(uid, { search: on });
+        await this.ilink.sendText(uid, `web search → ${on ? 'ON' : 'OFF'}\n(Codex: --search)`);
         break;
       }
 
-      case 'cancel': {
-        const task = this.activeTasks.get(userId);
+      // ─── Tool switch ───
+      case 'use': case 'switch': case 'sw': {
+        const t = TOOL_ALIASES[args.toLowerCase()] || args.toLowerCase();
+        if (!this.registry.isAvailable(t)) {
+          await this.ilink.sendText(uid, `"${t}" 不可用\n可用: ${this.registry.getAvailableNames().join(', ')}`);
+          return;
+        }
+        this.sessions.update(uid, { defaultTool: t });
+        await this.ilink.sendText(uid, `→ ${t}`);
+        break;
+      }
+
+      // ─── Session ───
+      case 'new': case 'n': {
+        this.sessions.clearSession(uid);
+        await this.ilink.sendText(uid, '新会话 (所有工具)');
+        break;
+      }
+
+      case 'cancel': case 'c': {
+        const task = this.active.get(uid);
         if (task) {
           task.abort.abort();
-          this.activeTasks.delete(userId);
-          await this.ilink.sendText(userId, `已取消 ${task.tool} 任务`);
+          this.active.delete(uid);
+          await this.ilink.sendText(uid, `已取消 ${task.tool}`);
         } else {
-          await this.ilink.sendText(userId, '当前没有运行中的任务');
+          await this.ilink.sendText(uid, '无运行中任务');
         }
+        break;
+      }
+
+      // ─── Status ───
+      case 'status': case 'st': {
+        const def = settings.defaultTool || this.config.defaultTool;
+        const busy = this.active.get(uid);
+        const sessions = Object.entries(settings.sessionIds)
+          .map(([k, v]) => `  ${k}: ${v.substring(0, 8)}...`).join('\n') || '  (无)';
+        await this.ilink.sendText(uid, [
+          `工具: ${def}`,
+          `模式: ${settings.mode}`,
+          `effort: ${settings.effort}`,
+          `model: ${settings.model || '默认'}`,
+          `turns: ${settings.maxTurns}`,
+          `budget: ${settings.maxBudget > 0 ? '$' + settings.maxBudget : '无限制'}`,
+          `search: ${settings.search ? 'ON' : 'OFF'}`,
+          `状态: ${busy ? `${busy.tool} 运行中` : '空闲'}`,
+          `会话:\n${sessions}`,
+        ].join('\n'));
+        break;
+      }
+
+      // ─── Tools ───
+      case 'tools': case 'ls': {
+        const lines = this.registry.getAll().map((a) => {
+          const ok = this.registry.isAvailable(a.name) ? '●' : '○';
+          const caps: string[] = [];
+          if (a.capabilities.hasEffort) caps.push('effort');
+          if (a.capabilities.hasSearch) caps.push('search');
+          if (a.capabilities.hasBudget) caps.push('budget');
+          if (a.capabilities.sessionResume) caps.push('resume');
+          return `${ok} ${a.displayName} (/${a.name}) [${a.capabilities.modes.join('/')}] ${caps.length ? '{' + caps.join(',') + '}' : ''}`;
+        });
+        await this.ilink.sendText(uid, lines.join('\n'));
+        break;
+      }
+
+      // ─── Help ───
+      case 'help': case 'h': {
+        await this.ilink.sendText(uid, [
+          'WX AI Bridge',
+          '',
+          '— 发消息 —',
+          '直接打字 → 默认工具',
+          '@claude @codex @gemini @aider',
+          '',
+          '— 切工具 —',
+          '/cc /cx /gm /ai',
+          '/use <名称>',
+          '',
+          '— 模式 —',
+          '/auto  全自动(跳过权限)',
+          '/safe  安全(需确认)',
+          '/plan  只读规划',
+          '',
+          '— 调参 —',
+          '/effort <min|low|med|high|max>',
+          '/model <名称> | /model reset',
+          '/turns <1-200>',
+          '/budget <USD> | /budget off',
+          '/search  切换web搜索(Codex)',
+          '',
+          '— 会话 —',
+          '/new     新会话',
+          '/cancel  取消任务',
+          '/status  当前配置',
+          '/tools   工具列表',
+        ].join('\n'));
         break;
       }
 
       default:
-        await this.ilink.sendText(
-          userId,
-          `未知命令: /${command}\n发送 /help 查看帮助`,
-        );
+        await this.ilink.sendText(uid, `? /${cmd}\n/help 查看帮助`);
     }
   }
 
-  // ─── Execute CLI and reply ─────────────────────────────
+  // ─── Execute ───────────────────────────────────────────
 
-  private async executeAndReply(
-    userId: string,
-    toolName: string,
-    prompt: string,
-  ): Promise<void> {
+  private async exec(uid: string, toolName: string, prompt: string): Promise<void> {
     const adapter = this.registry.get(toolName);
     if (!adapter) return;
 
     const abort = new AbortController();
-    this.activeTasks.set(userId, { abort, tool: toolName });
-
-    const stopTyping = await this.ilink.startTyping(userId);
-    const startTime = Date.now();
+    this.active.set(uid, { abort, tool: toolName });
+    const stopTyping = await this.ilink.startTyping(uid);
+    const start = Date.now();
 
     try {
-      const sessionId = adapter.capabilities.sessionResume
-        ? this.sessions.getSessionId(userId, toolName)
-        : undefined;
-
-      const toolConfig = this.config.tools[toolName];
+      const settings = this.sessions.get(uid);
 
       const result = await adapter.execute(prompt, {
-        sessionId,
+        settings,
         workDir: this.config.workDir,
         timeout: this.config.cliTimeout,
-        extraArgs: toolConfig?.args,
+        extraArgs: this.config.tools[toolName]?.args,
         signal: abort.signal,
       });
 
-      // Don't send if cancelled
       if (abort.signal.aborted) return;
 
-      const elapsed = Date.now() - startTime;
-
-      // Save session for resume
       if (result.sessionId && adapter.capabilities.sessionResume) {
-        this.sessions.setSessionId(userId, toolName, result.sessionId);
+        this.sessions.setSession(uid, toolName, result.sessionId);
       }
 
-      const response = formatResponse(result.text, {
+      await this.ilink.sendText(uid, formatResponse(result.text, {
         tool: adapter.displayName,
-        duration: result.duration || elapsed,
-        cost: result.cost,
+        mode: settings.mode,
+        effort: settings.effort,
+        duration: result.duration || (Date.now() - start),
         error: result.error,
-      });
-
-      await this.ilink.sendText(userId, response);
+      }));
     } catch (err: unknown) {
       if (!abort.signal.aborted) {
-        log.error(`[${toolName}] 执行失败:`, err);
-        await this.ilink.sendText(
-          userId,
-          `执行失败: ${(err as Error).message || '未知错误'}`,
-        );
+        log.error(`[${toolName}] 失败:`, err);
+        await this.ilink.sendText(uid, `失败: ${(err as Error).message}`);
       }
     } finally {
       stopTyping();
-      this.activeTasks.delete(userId);
+      this.active.delete(uid);
     }
   }
 }

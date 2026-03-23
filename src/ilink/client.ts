@@ -116,7 +116,8 @@ export class ILinkClient {
 
       const data = (await res.json()) as GetUpdatesResponse;
 
-      if (data.ret !== 0) {
+      // API omits ret/errcode on success; only check when explicitly present and non-zero
+      if (data.ret !== undefined && data.ret !== 0) {
         const e: Error & { errcode?: number } = new Error(
           data.errmsg || `ret=${data.ret}`,
         );
@@ -212,8 +213,8 @@ export class ILinkClient {
       throw new Error(`发送消息失败: HTTP ${res.status} ${body}`);
     }
 
-    const data = (await res.json()) as { ret: number; errmsg?: string };
-    if (data.ret !== 0) {
+    const data = (await res.json()) as { ret?: number; errmsg?: string };
+    if (data.ret !== undefined && data.ret !== 0) {
       throw new Error(`发送消息失败: ${data.errmsg || `ret=${data.ret}`}`);
     }
   }

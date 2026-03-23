@@ -11,36 +11,69 @@ export class CodexAdapter implements CLIAdapter {
     streaming: true,
     jsonOutput: true,
     sessionResume: true,
+    modes: ['auto', 'safe', 'plan'],
+    hasEffort: false,
+    hasModel: true,
+    hasSearch: true,
+    hasBudget: false,
   };
 
   async isAvailable(): Promise<boolean> {
     return commandExists(this.command);
   }
 
-  execute(prompt: string, opts?: ExecOptions): Promise<ExecResult> {
+  execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
+      const { settings } = opts;
       const args: string[] = [];
 
-      if (opts?.sessionId) {
-        args.push('exec', 'resume', opts.sessionId, prompt);
+      // ── Session resume ──
+      const sid = settings.sessionIds[this.name];
+      if (sid) {
+        args.push('exec', 'resume', sid, prompt);
       } else {
-        args.push('exec', '--full-auto', '--skip-git-repo-check', prompt);
+        args.push('exec');
+
+        // ── Mode ──
+        // auto:  --yolo (bypass all approvals + sandbox)
+        // safe:  --sandbox read-only, --ask-for-approval untrusted
+        // plan:  --sandbox read-only, --ask-for-approval untrusted
+        switch (settings.mode) {
+          case 'auto':
+            args.push('--dangerously-bypass-approvals-and-sandbox');
+            break;
+          case 'safe':
+            args.push('--sandbox', 'read-only', '--ask-for-approval', 'untrusted');
+            break;
+          case 'plan':
+            args.push('--sandbox', 'read-only', '--ask-for-approval', 'untrusted');
+            break;
+        }
+
+        args.push('--skip-git-repo-check');
+
+        // ── Model ──
+        if (settings.model) args.push('-m', settings.model);
+
+        // ── Web search ──
+        if (settings.search) args.push('--search');
+
+        args.push(prompt);
       }
 
-      if (opts?.extraArgs) args.push(...opts.extraArgs);
+      if (opts.extraArgs) args.push(...opts.extraArgs);
 
-      log.debug(`[codex] ${this.command} ${args[0]} "${prompt.substring(0, 40)}..."`);
+      log.debug(`[codex] mode=${settings.mode} search=${settings.search}`);
 
       const proc = spawn(this.command, args, {
-        cwd: opts?.workDir,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: opts.workDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env },
       });
 
-      setupAbort(proc, opts?.signal);
-      const timer = setupTimeout(proc, opts?.timeout);
+      setupAbort(proc, opts.signal);
+      const timer = setupTimeout(proc, opts.timeout);
 
-      // Codex sends progress to stderr, final message to stdout
       let stdout = '';
       let stderr = '';
       proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
@@ -48,17 +81,9 @@ export class CodexAdapter implements CLIAdapter {
 
       proc.on('close', (code) => {
         if (timer) clearTimeout(timer);
-
-        if (opts?.signal?.aborted) {
-          resolve({ text: '已取消', error: true });
-          return;
-        }
-
+        if (opts.signal?.aborted) { resolve({ text: '已取消', error: true }); return; }
         const output = stripAnsi(stdout.trim() || stderr.trim());
-        resolve({
-          text: output || `退出码 ${code}`,
-          error: code !== 0,
-        });
+        resolve({ text: output || `exit ${code}`, error: code !== 0 });
       });
 
       proc.on('error', (err) => {
