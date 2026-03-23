@@ -15,8 +15,8 @@ async function main() {
   console.log(
     `
 ╔══════════════════════════════════════╗
-║        WX AI Bridge v0.1.0          ║
-║   WeChat <-> AI CLI Bridge Service  ║
+║       cli-in-wechat  v0.1.0        ║
+║  Claude Code / Codex / Gemini CLI  ║
 ╚══════════════════════════════════════╝
 `,
   );

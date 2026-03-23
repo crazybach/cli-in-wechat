@@ -1,11 +1,11 @@
 {
-  "name": "wx-ai-bridge",
+  "name": "cli-in-wechat",
   "version": "0.1.0",
-  "description": "Bridge multiple AI CLI tools (Claude Code, Codex, Gemini, Aider) to WeChat via iLink Bot API",
+  "description": "Run Claude Code, Codex, Gemini CLI in WeChat via iLink Bot API",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "wx-ai-bridge": "dist/index.js"
+    "cli-in-wechat": "dist/index.js"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
