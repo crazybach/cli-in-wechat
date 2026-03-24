@@ -57,12 +57,21 @@ export const DEFAULT_SETTINGS: UserSettings = {
   extensions: '',
 };
 
+export interface AskUserRequest {
+  questions: Array<{
+    question: string;
+    options: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+  }>;
+}
+
 export interface ExecOptions {
   settings: UserSettings;
   workDir?: string;
   timeout?: number;
   extraArgs?: string[];
   signal?: AbortSignal;
+  askUser?: (req: AskUserRequest) => Promise<Record<string, string>>;
 }
 
 export interface ExecResult {

@@ -5,8 +5,10 @@ import { SessionManager } from './session.js';
 import { formatResponse } from './formatter.js';
 import type { WeixinMessage } from '../ilink/types.js';
 import type { BridgeConfig } from '../config.js';
+import type { AskUserRequest } from '../adapters/base.js';
 
 interface ActiveTask { abort: AbortController; tool: string }
+interface PendingQuestion { resolve: (answer: string) => void; timeout: ReturnType<typeof setTimeout> }
 
 const TOOL_ALIASES: Record<string, string> = {
   claude: 'claude', cc: 'claude',
@@ -22,6 +24,7 @@ export class Router {
   private config: BridgeConfig;
   private active = new Map<string, ActiveTask>();
   private lastResponse = new Map<string, { tool: string; text: string }>();
+  private pendingQuestions = new Map<string, PendingQuestion>();
 
   constructor(ilink: ILinkClient, registry: AdapterRegistry, sessions: SessionManager, config: BridgeConfig) {
     this.ilink = ilink;
@@ -41,6 +44,15 @@ export class Router {
     if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(uid)) return;
 
     const trimmed = text.trim();
+
+    // ── Answer pending AskUserQuestion ──
+    const pending = this.pendingQuestions.get(uid);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      this.pendingQuestions.delete(uid);
+      pending.resolve(trimmed);
+      return;
+    }
 
     // Busy check
     if (this.active.has(uid)) {
@@ -653,6 +665,56 @@ export class Router {
 
   // ─── Execute single tool ──────────────────────────────
 
+  // ─── AskUserQuestion via WeChat ─────────────────────────
+
+  private async askUserViaWeChat(uid: string, req: AskUserRequest): Promise<Record<string, string>> {
+    // Format questions for WeChat display
+    const lines: string[] = ['Claude 需要你的回答:'];
+    for (const q of req.questions) {
+      lines.push('');
+      lines.push(`❓ ${q.question}`);
+      q.options.forEach((opt, i) => {
+        lines.push(`  ${i + 1}. ${opt.label}${opt.description ? ` — ${opt.description}` : ''}`);
+      });
+      if (q.multiSelect) lines.push('  (可多选，用逗号分隔数字)');
+    }
+    lines.push('');
+    lines.push('请直接回复选项编号或内容:');
+
+    await this.ilink.sendText(uid, lines.join('\n'));
+
+    // Wait for user reply (timeout 5 min)
+    const reply = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingQuestions.delete(uid);
+        reject(new Error('回复超时'));
+      }, 300_000);
+      this.pendingQuestions.set(uid, { resolve, timeout });
+    });
+
+    // Parse reply → map to question answers
+    const answers: Record<string, string> = {};
+    const replyParts = reply.split(/[,，]/);
+
+    for (let i = 0; i < req.questions.length; i++) {
+      const q = req.questions[i];
+      const userInput = (replyParts[i] || reply).trim();
+
+      // Try to match by number
+      const num = parseInt(userInput);
+      if (num >= 1 && num <= q.options.length) {
+        answers[q.question] = q.options[num - 1].label;
+      } else {
+        // Try to match by label
+        const match = q.options.find(o => o.label.toLowerCase() === userInput.toLowerCase());
+        answers[q.question] = match ? match.label : userInput;
+      }
+    }
+
+    log.debug(`[askUser] answers: ${JSON.stringify(answers)}`);
+    return answers;
+  }
+
   private async exec(uid: string, toolName: string, prompt: string): Promise<void> {
     const adapter = this.registry.get(toolName);
     if (!adapter) return;
@@ -670,6 +732,7 @@ export class Router {
         timeout: this.config.cliTimeout,
         extraArgs: this.config.tools[toolName]?.args,
         signal: abort.signal,
+        askUser: (req) => this.askUserViaWeChat(uid, req),
       });
 
       if (abort.signal.aborted) return;
