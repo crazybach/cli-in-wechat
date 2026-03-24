@@ -553,6 +553,27 @@ export class Router {
         return true;
       }
 
+      case 'session': {
+        const tool = settings.defaultTool || this.config.defaultTool;
+        if (!arg) {
+          // Show current session IDs (full, for copy-paste)
+          const sids = Object.entries(settings.sessionIds);
+          if (sids.length === 0) {
+            await reply('无活跃会话\n\n/session set <id> 可手动设置\n(用于从终端/其他通道接续会话)');
+          } else {
+            const lines = sids.map(([k, v]) => `${k}: ${v}`);
+            await reply(`活跃会话:\n${lines.join('\n')}\n\n复制 ID 可在终端用 claude --resume <id> 接续`);
+          }
+        } else if (arg.startsWith('set ')) {
+          const id = arg.substring(4).trim();
+          this.sessions.setSession(uid, tool, id);
+          await reply(`${tool} session → ${id}\n下条消息将 --resume 此会话`);
+        } else {
+          await reply('/session — 查看会话 ID\n/session set <id> — 手动设置(跨通道接续)');
+        }
+        return true;
+      }
+
       // ═══════════════════════════════════════════
       // 不适用于微信的命令 (给出说明)
       // ═══════════════════════════════════════════
