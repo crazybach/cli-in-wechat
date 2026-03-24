@@ -1,7 +1,6 @@
-import { spawn } from 'node:child_process';
 import { log } from '../utils/logger.js';
-import { commandExists, setupAbort, setupTimeout, stripAnsi, spawnOpts } from './claude.js';
 import type { CLIAdapter, ExecOptions, ExecResult, AdapterCapabilities } from './base.js';
+import { commandExists, spawnProc, setupAbort, setupTimeout, stripAnsi } from './base.js';
 
 export class KimiAdapter implements CLIAdapter {
   readonly name = 'kimi';
@@ -51,8 +50,6 @@ export class KimiAdapter implements CLIAdapter {
       const sid = settings.sessionIds[this.name];
       if (sid) {
         args.push('-S', sid);
-      } else if (false /* kimiContinue not yet exposed */) {
-        args.push('-C'); // continue last session
       }
 
       // ── Working directory ──
@@ -77,7 +74,9 @@ export class KimiAdapter implements CLIAdapter {
 
       log.debug(`[kimi] model=${settings.model || 'default'} thinking=${settings.thinking || false}`);
 
-      const proc = spawn(this.command, args, spawnOpts(settings.workDir || opts.workDir) as any);
+      const proc = spawnProc(this.command, args, {
+        cwd: settings.workDir || opts.workDir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env },
+      });
 
       setupAbort(proc, opts.signal);
       const timer = setupTimeout(proc, opts.timeout);
