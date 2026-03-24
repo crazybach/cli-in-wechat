@@ -14,6 +14,7 @@ const TOOL_ALIASES: Record<string, string> = {
   claude: 'claude', cc: 'claude',
   codex: 'codex', cx: 'codex',
   gemini: 'gemini', gm: 'gemini',
+  kimi: 'kimi', km: 'kimi',
   aider: 'aider', ai: 'aider',
 };
 
@@ -170,6 +171,7 @@ export class Router {
           '/approval <模式>  审批(Gemini)',
           '/include <目录>  上下文(Gemini)',
           '/ext <名>  扩展(Gemini)',
+          '/thinking  深度思考(Kimi)',
           '',
           '— 操作 —',
           '/diff  查看git差异',
@@ -192,10 +194,10 @@ export class Router {
           '/yolo  auto+effort max',
           '/fast  effort low',
           '/reset  重置所有设置',
-          '/cc /cx /gm  切工具',
+          '/cc /cx /gm /km  切工具',
           '',
           '— 发消息 —',
-          '@claude/@codex/@gemini  指定工具',
+          '@claude/@codex/@gemini/@kimi  指定工具',
           '>>  接力(传上条结果)',
           '@tool1>tool2  链式调用',
         ].join('\n'));
@@ -251,9 +253,9 @@ export class Router {
         if (!v) { await reply('/mode <auto|safe|plan>\nauto=最高权限 safe=需确认 plan=只读'); return true; }
         this.sessions.update(uid, { mode: v as any });
         const desc: Record<string, string> = {
-          auto: 'AUTO\nClaude: --dangerously-skip-permissions\nCodex: --yolo\nGemini: --approval-mode yolo',
-          safe: 'SAFE\nClaude: 默认权限\nCodex: --full-auto\nGemini: --approval-mode default',
-          plan: 'PLAN\nClaude: --permission-mode plan\nCodex: --sandbox read-only\nGemini: --approval-mode plan',
+          auto: 'AUTO\nClaude: --dangerously-skip-permissions\nCodex: --yolo\nGemini: --approval-mode yolo\nKimi: --print (自带yolo)',
+          safe: 'SAFE\nClaude: 默认权限\nCodex: --full-auto\nGemini: --approval-mode default\nKimi: 默认',
+          plan: 'PLAN\nClaude: --permission-mode plan\nCodex: --sandbox read-only\nGemini: --approval-mode plan\nKimi: /plan',
         };
         await reply(desc[v]);
         return true;
@@ -369,6 +371,16 @@ export class Router {
         this.sessions.update(uid, { profile: arg === 'reset' ? '' : arg });
         await reply(arg === 'reset' ? 'profile → 默认' : `profile → ${arg}`);
         return true;
+
+      // ═══════════════════════════════════════════
+      // Kimi Code
+      // ═══════════════════════════════════════════
+
+      case 'thinking': {
+        this.sessions.update(uid, { thinking: !settings.thinking });
+        await reply(`thinking → ${!settings.thinking ? 'ON (深度思考)' : 'OFF'}`);
+        return true;
+      }
 
       // ═══════════════════════════════════════════
       // Gemini
@@ -603,6 +615,8 @@ export class Router {
         this.sessions.update(uid, { defaultTool: 'codex' }); await reply('→ codex'); return true;
       case 'gemini': case 'gm':
         this.sessions.update(uid, { defaultTool: 'gemini' }); await reply('→ gemini'); return true;
+      case 'kimi': case 'km':
+        this.sessions.update(uid, { defaultTool: 'kimi' }); await reply('→ kimi'); return true;
       case 'aider': case 'ai':
         this.sessions.update(uid, { defaultTool: 'aider' }); await reply('→ aider'); return true;
 

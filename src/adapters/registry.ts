@@ -4,6 +4,7 @@ import { ClaudeAdapter } from './claude.js';
 import { CodexAdapter } from './codex.js';
 import { GeminiAdapter } from './gemini.js';
 import { AiderAdapter } from './aider.js';
+import { KimiAdapter } from './kimi.js';
 
 export class AdapterRegistry {
   private adapters = new Map<string, CLIAdapter>();
@@ -13,6 +14,7 @@ export class AdapterRegistry {
     this.register(new ClaudeAdapter());
     this.register(new CodexAdapter());
     this.register(new GeminiAdapter());
+    this.register(new KimiAdapter());
     this.register(new AiderAdapter());
   }
 
