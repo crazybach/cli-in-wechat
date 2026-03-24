@@ -42,9 +42,23 @@ export class Router {
 
   private resolveToolFromRefText(refText: string): string | undefined {
     // Parse tool from footer: "— DisplayName | ..."
-    const footerMatch = refText.match(/— (.+?) \|/);
+    const footerMatch = refText.match(/— ([^\|\n]+?)(?:\s*\||\s*$)/m);
     if (footerMatch) return this.registry.getNameByDisplayName(footerMatch[1].trim());
     return undefined;
+  }
+
+  // ── getCli: determine terminal from @mention → ref footer → current session ──
+  private getCli(uid: string, text: string, refText?: string): string {
+    const atMatch = text.match(/^@(\w+)/);
+    if (atMatch) {
+      const resolved = TOOL_ALIASES[atMatch[1].toLowerCase()];
+      if (resolved && this.registry.isAvailable(resolved)) return resolved;
+    }
+    if (refText) {
+      const resolved = this.resolveToolFromRefText(refText);
+      if (resolved && this.registry.isAvailable(resolved)) return resolved;
+    }
+    return this.sessions.get(uid).defaultTool || this.config.defaultTool;
   }
 
 
@@ -53,60 +67,6 @@ export class Router {
     if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(uid)) return;
 
     const trimmed = text.trim();
-
-    // ── Resolve quoted tool from ref_msg ──
-    const refTool = refText ? this.resolveToolFromRefText(refText) : undefined;
-
-    // ── @tool prefix: highest priority, always route as new task ──
-    const atMatch = trimmed.match(/^@(\w+)(?:[\s：:]\s*([\s\S]+))?$/);
-    if (atMatch) {
-      const alias = atMatch[1].toLowerCase();
-      const resolved = TOOL_ALIASES[alias];
-      if (!resolved) {
-        await this.ilink.sendText(uid, `未知终端: @${atMatch[1]}\n可用: ${Object.keys(TOOL_ALIASES).join(', ')}`);
-        return;
-      }
-      if (!this.registry.isAvailable(resolved)) {
-        await this.ilink.sendText(uid, `"${resolved}" 不可用\n可用: ${this.registry.getAvailableNames().join(', ')}`);
-        return;
-      }
-      this.sessions.update(uid, { defaultTool: resolved });
-      if (!atMatch[2]) {
-        await this.ilink.sendText(uid, `已切换到 ${resolved}`);
-        return;
-      }
-      if (this.active.has(`${uid}:${resolved}`)) { await this.ilink.sendText(uid, `${resolved} 在忙`); return; }
-      const prompt = atMatch[2].trim();
-      await this.exec(uid, resolved, refText ? `${prompt}\n\n${refText}` : prompt);
-      return;
-    }
-
-    // ── If quoting a pending AskUserQuestion, answer it ──
-    if (refTool && trimmed) {
-      const pendingKey = `${uid}:${refTool}`;
-      const pending = this.pendingQuestions.get(pendingKey);
-      if (pending) {
-        clearTimeout(pending.timeout);
-        this.pendingQuestions.delete(pendingKey);
-        pending.resolve(trimmed);
-        return;
-      }
-    }
-
-    // ── No ref: check pending questions ──
-    if (!refTool) {
-      const userPending = [...this.pendingQuestions.entries()].filter(([k]) => k.startsWith(`${uid}:`));
-      if (userPending.length === 1 && trimmed) {
-        const [key, pending] = userPending[0];
-        clearTimeout(pending.timeout);
-        this.pendingQuestions.delete(key);
-        pending.resolve(trimmed);
-        return;
-      } else if (userPending.length > 1) {
-        await this.ilink.sendText(uid, '有多个待回答的问题，请引用具体问题后回复');
-        return;
-      }
-    }
 
     // ── /command ──
     if (trimmed.startsWith('/')) {
@@ -138,46 +98,54 @@ export class Router {
         await this.ilink.sendText(uid, '没有上一条回复可接力');
         return;
       }
-
-      // >> @tool prompt  →  relay to specific tool
-      let tool: string | undefined;
-      let prompt = rest;
-      const atMatch = rest.match(/^@(\w+)[\s：:]\s*([\s\S]+)$/);
-      if (atMatch) {
-        const resolved = TOOL_ALIASES[atMatch[1].toLowerCase()];
-        if (resolved && this.registry.isAvailable(resolved)) {
-          tool = resolved;
-          prompt = atMatch[2].trim();
-          this.sessions.update(uid, { defaultTool: resolved });
-        }
-      }
-
-      const toolName = tool || this.sessions.get(uid).defaultTool || this.config.defaultTool;
+      const atRelayMatch = rest.match(/^@(\w+)[\s：:]\s*([\s\S]+)$/);
+      const prompt = atRelayMatch ? atRelayMatch[2].trim() : rest;
+      const toolName = this.getCli(uid, rest, refText);
+      this.sessions.update(uid, { defaultTool: toolName });
       if (this.active.has(`${uid}:${toolName}`)) { await this.ilink.sendText(uid, `${toolName} 在忙`); return; }
       const fullPrompt = `以下是 ${prev.tool} 的输出:\n\n${prev.text}\n\n---\n\n${prompt}`;
       await this.exec(uid, toolName, fullPrompt);
       return;
     }
 
-    // ── Quote routing: ref points to a specific tool, no @tool ──
-    if (refTool && trimmed) {
-      if (!this.registry.isAvailable(refTool)) {
-        await this.ilink.sendText(uid, `"${refTool}" 不可用`);
-        return;
-      }
-      if (this.active.has(`${uid}:${refTool}`)) { await this.ilink.sendText(uid, `${refTool} 在忙`); return; }
-      await this.exec(uid, refTool, refText ? `${trimmed}\n\n${refText}` : trimmed);
+    // ── @mention 合法性校验 ──
+    const atMatch = trimmed.match(/^@(\w+)(?:[\s：:]\s*([\s\S]+))?$/);
+    if (atMatch && !TOOL_ALIASES[atMatch[1].toLowerCase()]) {
+      await this.ilink.sendText(uid, `未知终端: @${atMatch[1]}\n可用: ${Object.keys(TOOL_ALIASES).join(', ')}`);
       return;
     }
 
-    // Plain text → send to current default tool (auto-updated after each exec)
-    const toolName = this.sessions.get(uid).defaultTool || this.config.defaultTool;
+    const toolName = this.getCli(uid, trimmed, refText);
+
+    // ── If a tool is waiting for AskUser reply, resolve it before normal execution ──
+    const pendingKey = `${uid}:${toolName}`;
+    const pending = this.pendingQuestions.get(pendingKey);
+    if (pending && trimmed) {
+      clearTimeout(pending.timeout);
+      this.pendingQuestions.delete(pendingKey);
+      pending.resolve(trimmed);
+      return;
+    }
+
+    // ── getCli 决定终端，立即切换 defaultTool ──
+    this.sessions.update(uid, { defaultTool: toolName });
+
     if (!this.registry.isAvailable(toolName)) {
       await this.ilink.sendText(uid, `"${toolName}" 不可用\n可用: ${this.registry.getAvailableNames().join(', ')}`);
       return;
     }
+
+    // @tool 无 prompt → 仅切换，确认后返回
+    if (atMatch && !atMatch[2]) {
+      await this.ilink.sendText(uid, `已切换到 ${toolName}`);
+      return;
+    }
+
     if (this.active.has(`${uid}:${toolName}`)) { await this.ilink.sendText(uid, `${toolName} 在忙`); return; }
-    await this.exec(uid, toolName, trimmed);
+
+    const prompt = atMatch ? atMatch[2].trim() : trimmed;
+    const combined = [prompt, refText].filter(Boolean).join('\n\n');
+    await this.exec(uid, toolName, combined);
   }
 
   // ─── /command → ALL are commands, never pass through ────
