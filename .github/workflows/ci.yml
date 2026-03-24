@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [18, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+      - name: Test module loading
+        run: node -e "import('./dist/adapters/registry.js').then(m => { const r = new m.AdapterRegistry(); console.log('Registry OK, adapters:', r.getAll().map(a => a.name).join(', ')); })"
+
+      - name: Test config module
+        run: node -e "import('./dist/config.js').then(m => { m.ensureDataDir(); console.log('Config OK:', JSON.stringify(m.loadConfig())); })"
+
+      - name: Test spawn helper (platform-specific)
+        run: node -e "import('./dist/adapters/claude.js').then(async m => { const exists = await m.commandExists('node'); console.log('commandExists(node):', exists); if (!exists) process.exit(1); })"
