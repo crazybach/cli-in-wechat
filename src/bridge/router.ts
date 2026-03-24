@@ -5,13 +5,16 @@ import { SessionManager } from './session.js';
 import { formatResponse } from './formatter.js';
 import type { WeixinMessage } from '../ilink/types.js';
 import type { BridgeConfig } from '../config.js';
+import type { AskUserRequest } from '../adapters/base.js';
 
 interface ActiveTask { abort: AbortController; tool: string }
+interface PendingQuestion { resolve: (answer: string) => void; timeout: ReturnType<typeof setTimeout> }
 
 const TOOL_ALIASES: Record<string, string> = {
   claude: 'claude', cc: 'claude',
   codex: 'codex', cx: 'codex',
   gemini: 'gemini', gm: 'gemini',
+  kimi: 'kimi', km: 'kimi',
   aider: 'aider', ai: 'aider',
 };
 
@@ -22,6 +25,7 @@ export class Router {
   private config: BridgeConfig;
   private active = new Map<string, ActiveTask>();
   private lastResponse = new Map<string, { tool: string; text: string }>();
+  private pendingQuestions = new Map<string, PendingQuestion>();
 
   constructor(ilink: ILinkClient, registry: AdapterRegistry, sessions: SessionManager, config: BridgeConfig) {
     this.ilink = ilink;
@@ -41,6 +45,21 @@ export class Router {
     if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(uid)) return;
 
     const trimmed = text.trim();
+
+    // ── Answer pending AskUserQuestion ──
+    const pending = this.pendingQuestions.get(uid);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      this.pendingQuestions.delete(uid);
+      pending.resolve(trimmed);
+      return;
+    }
+
+    // Busy check
+    if (this.active.has(uid)) {
+      await this.ilink.sendText(uid, '处理中...');
+      return;
+    }
 
     // ── /command → ALL / messages are commands, never pass through ──
     if (trimmed.startsWith('/')) {
@@ -166,6 +185,7 @@ export class Router {
           '/approval <模式>  审批(Gemini)',
           '/include <目录>  上下文(Gemini)',
           '/ext <名>  扩展(Gemini)',
+          '/thinking  深度思考(Kimi)',
           '',
           '— 操作 —',
           '/diff  查看git差异',
@@ -188,10 +208,10 @@ export class Router {
           '/yolo  auto+effort max',
           '/fast  effort low',
           '/reset  重置所有设置',
-          '/cc /cx /gm  切工具',
+          '/cc /cx /gm /km  切工具',
           '',
           '— 发消息 —',
-          '@claude/@codex/@gemini  指定工具',
+          '@claude/@codex/@gemini/@kimi  指定工具',
           '>>  接力(传上条结果)',
           '@tool1>tool2  链式调用',
         ].join('\n'));
@@ -250,9 +270,9 @@ export class Router {
         if (!v) { await reply('/mode <auto|safe|plan>\nauto=最高权限 safe=需确认 plan=只读'); return true; }
         this.sessions.update(uid, { mode: v as any });
         const desc: Record<string, string> = {
-          auto: 'AUTO\nClaude: --dangerously-skip-permissions\nCodex: --yolo\nGemini: --approval-mode yolo',
-          safe: 'SAFE\nClaude: 默认权限\nCodex: --full-auto\nGemini: --approval-mode default',
-          plan: 'PLAN\nClaude: --permission-mode plan\nCodex: --sandbox read-only\nGemini: --approval-mode plan',
+          auto: 'AUTO\nClaude: --dangerously-skip-permissions\nCodex: --yolo\nGemini: --approval-mode yolo\nKimi: --print (自带yolo)',
+          safe: 'SAFE\nClaude: 默认权限\nCodex: --full-auto\nGemini: --approval-mode default\nKimi: 默认',
+          plan: 'PLAN\nClaude: --permission-mode plan\nCodex: --sandbox read-only\nGemini: --approval-mode plan\nKimi: /plan',
         };
         await reply(desc[v]);
         return true;
@@ -368,6 +388,16 @@ export class Router {
         this.sessions.update(uid, { profile: arg === 'reset' ? '' : arg });
         await reply(arg === 'reset' ? 'profile → 默认' : `profile → ${arg}`);
         return true;
+
+      // ═══════════════════════════════════════════
+      // Kimi Code
+      // ═══════════════════════════════════════════
+
+      case 'thinking': {
+        this.sessions.update(uid, { thinking: !settings.thinking });
+        await reply(`thinking → ${!settings.thinking ? 'ON (深度思考)' : 'OFF'}`);
+        return true;
+      }
 
       // ═══════════════════════════════════════════
       // Gemini
@@ -552,6 +582,27 @@ export class Router {
         return true;
       }
 
+      case 'session': {
+        const tool = settings.defaultTool || this.config.defaultTool;
+        if (!arg) {
+          // Show current session IDs (full, for copy-paste)
+          const sids = Object.entries(settings.sessionIds);
+          if (sids.length === 0) {
+            await reply('无活跃会话\n\n/session set <id> 可手动设置\n(用于从终端/其他通道接续会话)');
+          } else {
+            const lines = sids.map(([k, v]) => `${k}: ${v}`);
+            await reply(`活跃会话:\n${lines.join('\n')}\n\n复制 ID 可在终端用 claude --resume <id> 接续`);
+          }
+        } else if (arg.startsWith('set ')) {
+          const id = arg.substring(4).trim();
+          this.sessions.setSession(uid, tool, id);
+          await reply(`${tool} session → ${id}\n下条消息将 --resume 此会话`);
+        } else {
+          await reply('/session — 查看会话 ID\n/session set <id> — 手动设置(跨通道接续)');
+        }
+        return true;
+      }
+
       // ═══════════════════════════════════════════
       // 不适用于微信的命令 (给出说明)
       // ═══════════════════════════════════════════
@@ -581,6 +632,8 @@ export class Router {
         this.sessions.update(uid, { defaultTool: 'codex' }); await reply('→ codex'); return true;
       case 'gemini': case 'gm':
         this.sessions.update(uid, { defaultTool: 'gemini' }); await reply('→ gemini'); return true;
+      case 'kimi': case 'km':
+        this.sessions.update(uid, { defaultTool: 'kimi' }); await reply('→ kimi'); return true;
       case 'aider': case 'ai':
         this.sessions.update(uid, { defaultTool: 'aider' }); await reply('→ aider'); return true;
 
@@ -674,6 +727,7 @@ export class Router {
     if (signal.aborted) return { result: { text: '已取消', error: true }, notice: '' };
     const result = await adapter.execute(prompt, {
       settings: this.sessions.get(uid), workDir: this.config.workDir, timeout: this.config.cliTimeout, extraArgs, signal,
+      askUser: (req) => this.askUserViaWeChat(uid, req),
     });
 
     if (result.sessionExpired && hadSession && !signal.aborted) {
@@ -685,6 +739,56 @@ export class Router {
   }
 
   // ─── Execute single tool ──────────────────────────────
+
+  // ─── AskUserQuestion via WeChat ─────────────────────────
+
+  private async askUserViaWeChat(uid: string, req: AskUserRequest): Promise<Record<string, string>> {
+    // Format questions for WeChat display
+    const lines: string[] = ['Claude 需要你的回答:'];
+    for (const q of req.questions) {
+      lines.push('');
+      lines.push(`❓ ${q.question}`);
+      q.options.forEach((opt, i) => {
+        lines.push(`  ${i + 1}. ${opt.label}${opt.description ? ` — ${opt.description}` : ''}`);
+      });
+      if (q.multiSelect) lines.push('  (可多选，用逗号分隔数字)');
+    }
+    lines.push('');
+    lines.push('请直接回复选项编号或内容:');
+
+    await this.ilink.sendText(uid, lines.join('\n'));
+
+    // Wait for user reply (timeout 5 min)
+    const reply = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingQuestions.delete(uid);
+        reject(new Error('回复超时'));
+      }, 300_000);
+      this.pendingQuestions.set(uid, { resolve, timeout });
+    });
+
+    // Parse reply → map to question answers
+    const answers: Record<string, string> = {};
+    const replyParts = reply.split(/[,，]/);
+
+    for (let i = 0; i < req.questions.length; i++) {
+      const q = req.questions[i];
+      const userInput = (replyParts[i] || reply).trim();
+
+      // Try to match by number
+      const num = parseInt(userInput);
+      if (num >= 1 && num <= q.options.length) {
+        answers[q.question] = q.options[num - 1].label;
+      } else {
+        // Try to match by label
+        const match = q.options.find(o => o.label.toLowerCase() === userInput.toLowerCase());
+        answers[q.question] = match ? match.label : userInput;
+      }
+    }
+
+    log.debug(`[askUser] answers: ${JSON.stringify(answers)}`);
+    return answers;
+  }
 
   private async exec(uid: string, toolName: string, prompt: string): Promise<void> {
     const adapter = this.registry.get(toolName);

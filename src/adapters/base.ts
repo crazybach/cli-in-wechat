@@ -29,6 +29,9 @@ export interface UserSettings {
   ephemeral: boolean;
   profile: string;
 
+  // ── Kimi Code ──
+  thinking: boolean;
+
   // ── Gemini ──
   approvalMode: string;
   includeDirs: string;
@@ -55,10 +58,19 @@ export const DEFAULT_SETTINGS: UserSettings = {
   search: false,
   ephemeral: false,
   profile: '',
+  thinking: false,
   approvalMode: '',
   includeDirs: '',
   extensions: '',
 };
+
+export interface AskUserRequest {
+  questions: Array<{
+    question: string;
+    options: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+  }>;
+}
 
 export interface ExecOptions {
   settings: UserSettings;
@@ -66,6 +78,7 @@ export interface ExecOptions {
   timeout?: number;
   extraArgs?: string[];
   signal?: AbortSignal;
+  askUser?: (req: AskUserRequest) => Promise<Record<string, string>>;
 }
 
 export interface ExecResult {
