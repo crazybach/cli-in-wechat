@@ -570,14 +570,14 @@ export class Router {
         return true;
       }
 
-      case 'resume': case 'continue': {
-        // Show current sessions
+      case 'continue': {
+        // Alias for /resume
         const sids = Object.entries(settings.sessionIds);
         if (sids.length === 0) {
-          await reply('无保存的会话');
+          await reply('无活跃会话，用 /resume 浏览历史');
         } else {
           const lines = sids.map(([k, v]) => `${k}: ${String(v).substring(0, 12)}...`);
-          await reply(`保存的会话:\n${lines.join('\n')}`);
+          await reply(`活跃会话:\n${lines.join('\n')}\n\n/resume 浏览所有历史`);
         }
         return true;
       }

@@ -237,8 +237,10 @@ claude   # 看到 session ID: abc-123-def
 | `/clear` | 清除所有会话和历史 |
 | `/cancel` | 取消正在运行的任务 (SIGTERM) |
 | `/fork` | 分支当前会话 |
-| `/resume` | 查看保存的会话 ID |
-| `/session` | 查看完整会话 ID (可复制) |
+| `/resume` | 浏览所有历史会话 (带时间+摘要)，选编号恢复 |
+| `/resume <编号>` | 恢复指定会话 |
+| `/resume <uuid>` | 直接按 ID 恢复 |
+| `/session` | 查看当前活跃会话 ID |
 | `/session set <id>` | 手动设置 session ID (跨通道漫游) |
 
 ### 快捷命令
