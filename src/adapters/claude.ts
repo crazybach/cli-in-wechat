@@ -209,8 +209,9 @@ export class ClaudeAdapter implements CLIAdapter {
   private executeWithCLI(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       const { settings } = opts;
-      // 使用 stdin 传递提示词，避免 Windows shell 对特殊字符的处理问题
-      const args = ['--output-format', 'stream-json', '--thinking', 'enabled', '--verbose'];
+      // -p enables print (non-interactive) mode; prompt is passed via stdin below
+      // to avoid Windows cmd.exe issues with special characters in shell mode.
+      const args = ['-p', '--output-format', 'stream-json', '--thinking', 'enabled', '--verbose'];
 
       switch (settings.mode) {
         case 'auto': args.push('--dangerously-skip-permissions'); break;

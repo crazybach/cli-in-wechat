@@ -1130,38 +1130,6 @@ export class Router {
     }
   }
 
-  private formatIntermediateMessages(messages: import('../adapters/base.js').IntermediateMessage[], mode: string): string {
-    const parts: string[] = [];
-
-    for (const msg of messages) {
-      switch (msg.type) {
-        case 'thinking':
-          if (mode === 'verbose') {
-            parts.push(`\n💭 思考: ${msg.content.substring(0, 200)}${msg.content.length > 200 ? '...' : ''}`);
-          }
-          break;
-        case 'text':
-          if (msg.content.trim()) {
-            parts.push(`\n💬 ${msg.content.substring(0, 300)}${msg.content.length > 300 ? '...' : ''}`);
-          }
-          break;
-        case 'tool_use':
-          if (mode === 'verbose') {
-            parts.push(`\n🔧 调用工具: ${msg.toolName || 'unknown'}`);
-          }
-          break;
-        case 'tool_result':
-          if (mode === 'verbose') {
-            const preview = msg.content.substring(0, 200);
-            parts.push(`\n📤 结果: ${preview}${msg.content.length > 200 ? '...' : ''}`);
-          }
-          break;
-      }
-    }
-
-    return parts.length > 0 ? parts.join('\n') : '';
-  }
-
   private async parseAndSendFiles(uid: string, text: string): Promise<{ text: string; sentFiles: string[] }> {
     const { existsSync } = await import('node:fs');
     const sentFiles: string[] = [];

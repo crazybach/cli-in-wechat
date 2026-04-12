@@ -6,9 +6,10 @@ dist/
 # Runtime data
 .wx-ai-bridge/
 
-# IDE
+# IDE / editor config
 .vscode/
 .idea/
+.claude/
 *.swp
 
 # OS
