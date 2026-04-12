@@ -96,7 +96,10 @@ export class ClaudeAdapter implements CLIAdapter {
       const msg = message as Record<string, unknown>;
 
       if (msg.type === 'assistant') {
-        const content = msg.content as Array<{ type: string; thinking?: string }> | undefined;
+        // SDKAssistantMessage wraps the Anthropic message: content lives at msg.message.content,
+        // not directly on msg (see node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts).
+        const inner = msg.message as { content?: Array<{ type: string; thinking?: string }> } | undefined;
+        const content = inner?.content;
         if (content) {
           for (const block of content) {
             if (block.type === 'thinking' && block.thinking) {
@@ -128,7 +131,9 @@ export class ClaudeAdapter implements CLIAdapter {
   private executeWithCLI(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       const { settings } = opts;
-      const args = ['-p', prompt, '--output-format', 'stream-json', '--thinking', 'enabled', '--verbose'];
+      // --verbose is required by Claude CLI when using stream-json in -p mode.
+      const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
+      if (settings.showThoughts) args.push('--thinking', 'enabled');
 
       switch (settings.mode) {
         case 'auto': args.push('--dangerously-skip-permissions'); break;

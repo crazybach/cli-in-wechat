@@ -950,7 +950,7 @@ export class Router {
 
       // Send thinking content first if enabled
       if (settings.showThoughts && result.thinking) {
-        await this.ilink.sendText(uid, `THINKING:\n\n${result.thinking}\n\n---`);
+        await this.ilink.sendText(uid, `思考过程：\n\n${result.thinking}\n\n———`);
       }
 
       await this.ilink.sendText(uid, formatResponse(notice + result.text, {

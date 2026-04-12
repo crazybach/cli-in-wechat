@@ -16,7 +16,8 @@ export class OpenCodeAdapter implements CLIAdapter {
   execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       const { settings } = opts;
-      const args = ['run', prompt, '--format', 'json', '--thinking'];
+      const args = ['run', prompt, '--format', 'json'];
+      if (settings.showThoughts) args.push('--thinking');
 
       if (settings.workDir || opts.workDir) {
         args.push('--dir', settings.workDir || opts.workDir!);
@@ -37,7 +38,7 @@ export class OpenCodeAdapter implements CLIAdapter {
 
       if (opts.extraArgs) args.push(...opts.extraArgs);
 
-      log.debug(`[opencode] executing: run --format json --thinking`);
+      log.debug(`[opencode] executing: run --format json${settings.showThoughts ? ' --thinking' : ''}`);
 
       const proc = spawnProc(this.command, args, {
         cwd: settings.workDir || opts.workDir,
