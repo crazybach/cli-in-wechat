@@ -16,11 +16,23 @@ import type {
 const CHANNEL_VERSION = '1.0.2';
 const HTTP_TIMEOUT_MS = 45_000;
 const CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
+const REGULAR_RETRY_DELAYS_MS = [0, 30_000, 60_000, 120_000] as const;
+const INTERMEDIATE_RETRY_DELAYS_MS = [0, 12_000] as const;
+const BASE_RATE_LIMIT_COOLDOWN_MS = 150_000; // ~2.5 minutes
+const MAX_RATE_LIMIT_COOLDOWN_MS = 420_000; // ~7 minutes
 
 // Upload media types
 const UPLOAD_MEDIA_TYPE_IMAGE = 1;
 const UPLOAD_MEDIA_TYPE_VIDEO = 2;
 const UPLOAD_MEDIA_TYPE_FILE = 3;
+
+type SendStreamType = 'regular' | 'intermediate';
+
+interface UserRateLimitState {
+  consecutiveRet2: number;
+  suppressIntermediateUntil: number;
+  blockAllSendsUntil: number;
+}
 
 export type MessageHandler = (
   msg: WeixinMessage,
@@ -36,6 +48,8 @@ export class ILinkClient {
   private contextTokens = new Map<string, string>();
   private typingTickets = new Map<string, { ticket: string; ts: number }>();
   private handlers: MessageHandler[] = [];
+  private sendQueues = new Map<string, Promise<void>>();
+  private rateLimitStates = new Map<string, UserRateLimitState>();
   private backoffMs = 1000;
   private abortController: AbortController | null = null;
 
@@ -181,23 +195,128 @@ export class ILinkClient {
 
   // ─── Sending ───────────────────────────────────────────
 
-  async sendText(userId: string, text: string): Promise<void> {
+  private enqueueSend(userId: string, task: () => Promise<void>): Promise<void> {
+    const prev = this.sendQueues.get(userId) || Promise.resolve();
+    const run = prev.then(task, task);
+    const tracked = run.catch(() => {});
+    this.sendQueues.set(userId, tracked);
+    return run.finally(() => {
+      if (this.sendQueues.get(userId) === tracked) {
+        this.sendQueues.delete(userId);
+      }
+    });
+  }
+
+  private getRateLimitState(userId: string): UserRateLimitState {
+    const state = this.rateLimitStates.get(userId) || {
+      consecutiveRet2: 0,
+      suppressIntermediateUntil: 0,
+      blockAllSendsUntil: 0,
+    };
+    this.rateLimitStates.set(userId, state);
+    return state;
+  }
+
+  private isRateLimitedError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg.includes('ret=-2');
+  }
+
+  private nextCooldownMs(consecutiveRet2: number): number {
+    // 2nd consecutive ret=-2 => 150s; then linear backoff up to ~7min.
+    const steps = Math.max(0, consecutiveRet2 - 2);
+    return Math.min(MAX_RATE_LIMIT_COOLDOWN_MS, BASE_RATE_LIMIT_COOLDOWN_MS + steps * 60_000);
+  }
+
+  private async gateSendWindow(userId: string, streamType: SendStreamType): Promise<boolean> {
+    const state = this.getRateLimitState(userId);
+    const now = Date.now();
+
+    if (streamType === 'intermediate' && now < state.suppressIntermediateUntil) {
+      log.debug(`[send] 跳过中间消息(保护模式): ${userId.substring(0, 12)}...`);
+      return false;
+    }
+
+    if (now < state.blockAllSendsUntil) {
+      if (streamType === 'intermediate') {
+        log.debug('[send] 中间消息命中全局发送冷却，直接跳过');
+        return false;
+      }
+      const waitMs = state.blockAllSendsUntil - now;
+      log.warn(`[send] 命中限流冷却窗口，延迟发送 ${Math.ceil(waitMs / 1000)}s`);
+      await sleep(waitMs);
+    }
+
+    return true;
+  }
+
+  async sendText(userId: string, text: string, options?: { streamType?: SendStreamType }): Promise<void> {
     const token = this.contextTokens.get(userId);
     if (!token) {
       log.error(`无法发送给 ${userId}: 缺少 context_token (用户必须先发一条消息)`);
       return;
     }
+    const streamType = options?.streamType || 'regular';
+    if (!(await this.gateSendWindow(userId, streamType))) {
+      return;
+    }    
 
-    const chunks = chunkText(text, 2000);
-    log.debug(`发送给 [${userId.substring(0, 12)}...] (${chunks.length} 块): ${text.substring(0, 100)}${text.length > 100 ? '…' : ''}`);
-    for (let i = 0; i < chunks.length; i++) {
-      await this.sendRawMessage(userId, token, [
-        { type: 1 as const, text_item: { text: chunks[i] } },
-      ]);
-      if (i < chunks.length - 1) {
-        await sleep(300); // preserve ordering between chunks
+    await this.enqueueSend(userId, async () => {
+      const chunks = chunkText(text, 2000);
+      log.debug(`发送给 [${userId.substring(0, 12)}...] (${chunks.length} 块): ${text.substring(0, 100)}${text.length > 100 ? '…' : ''}`);
+      for (let i = 0; i < chunks.length; i++) {
+        await this.sendRawMessageWithRetry(userId, token, [
+          { type: 1 as const, text_item: { text: chunks[i] } },
+        ], streamType);
+      }
+    });
+  }
+
+  private async sendRawMessageWithRetry(
+    userId: string,
+    contextToken: string,
+    itemList: MessageItem[],
+    streamType: SendStreamType = 'regular',
+  ): Promise<void> {
+    const state = this.getRateLimitState(userId);
+    let lastErr: unknown = null;
+    const retryDelays = streamType === 'regular'
+      ? REGULAR_RETRY_DELAYS_MS
+      : INTERMEDIATE_RETRY_DELAYS_MS;
+
+    for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+      const delay = retryDelays[attempt];
+      if (delay > 0) await sleep(delay);
+
+      if (!(await this.gateSendWindow(userId, streamType))) {
+        return;
+      }
+
+      try {
+        await this.sendRawMessage(userId, contextToken, itemList);
+        state.consecutiveRet2 = 0;
+        state.blockAllSendsUntil = 0;
+        return;
+      } catch (err) {
+        lastErr = err;
+        const isRateLimited = this.isRateLimitedError(err);
+
+        if (isRateLimited) {
+          state.consecutiveRet2 += 1;
+          const cooldownMs = this.nextCooldownMs(state.consecutiveRet2);
+          const until = Date.now() + cooldownMs;
+          state.blockAllSendsUntil = Math.max(state.blockAllSendsUntil, until);
+          state.suppressIntermediateUntil = Math.max(state.suppressIntermediateUntil, until);
+          log.warn(`[send] 命中限流 ret=-2，进入冷却 ${Math.round(cooldownMs / 1000)}s (连续${state.consecutiveRet2}次)`);
+        }
+
+        if (!isRateLimited || attempt === retryDelays.length - 1) {
+          throw err;
+        }
+        log.warn(`[send] ret=-2 延迟重试 (${attempt + 1}/${retryDelays.length - 1})`);
       }
     }
+    throw lastErr instanceof Error ? lastErr : new Error('发送消息失败');
   }
 
   private async sendRawMessage(
@@ -252,20 +371,22 @@ export class ILinkClient {
     const upload = await this.uploadToCdn(userId, filePath, UPLOAD_MEDIA_TYPE_FILE);
     const fileName = title || basename(filePath);
 
-    await this.sendRawMessage(userId, token, [
-      {
-        type: 4,
-        file_item: {
-          file_name: fileName,
-          len: String(upload.rawsize),
-          media: {
-            encrypt_query_param: upload.downloadParam,
-            aes_key: encodeMessageAesKey(upload.aeskey),
-            encrypt_type: 1,
+    await this.enqueueSend(userId, async () => {
+      await this.sendRawMessageWithRetry(userId, token, [
+        {
+          type: 4,
+          file_item: {
+            file_name: fileName,
+            len: String(upload.rawsize),
+            media: {
+              encrypt_query_param: upload.downloadParam,
+              aes_key: encodeMessageAesKey(upload.aeskey),
+              encrypt_type: 1,
+            },
           },
         },
-      },
-    ]);
+      ]);
+    });
 
     log.info(`[sendFile] 已发送: ${fileName}`);
   }
@@ -287,19 +408,21 @@ export class ILinkClient {
 
     const upload = await this.uploadToCdn(userId, imagePath, UPLOAD_MEDIA_TYPE_IMAGE);
 
-    await this.sendRawMessage(userId, token, [
-      {
-        type: 2,
-        image_item: {
-          media: {
-            encrypt_query_param: upload.downloadParam,
-            aes_key: encodeMessageAesKey(upload.aeskey),
-            encrypt_type: 1,
+    await this.enqueueSend(userId, async () => {
+      await this.sendRawMessageWithRetry(userId, token, [
+        {
+          type: 2,
+          image_item: {
+            media: {
+              encrypt_query_param: upload.downloadParam,
+              aes_key: encodeMessageAesKey(upload.aeskey),
+              encrypt_type: 1,
+            },
+            mid_size: upload.filesize,
           },
-          mid_size: upload.filesize,
         },
-      },
-    ]);
+      ]);
+    });
 
     log.info(`[sendImage] 已发送图片: ${basename(imagePath)}`);
   }
@@ -317,19 +440,21 @@ export class ILinkClient {
 
     const upload = await this.uploadToCdn(userId, videoPath, UPLOAD_MEDIA_TYPE_VIDEO);
 
-    await this.sendRawMessage(userId, token, [
-      {
-        type: 5,
-        video_item: {
-          media: {
-            encrypt_query_param: upload.downloadParam,
-            aes_key: encodeMessageAesKey(upload.aeskey),
-            encrypt_type: 1,
+    await this.enqueueSend(userId, async () => {
+      await this.sendRawMessageWithRetry(userId, token, [
+        {
+          type: 5,
+          video_item: {
+            media: {
+              encrypt_query_param: upload.downloadParam,
+              aes_key: encodeMessageAesKey(upload.aeskey),
+              encrypt_type: 1,
+            },
+            video_size: upload.filesize,
           },
-          video_size: upload.filesize,
         },
-      },
-    ]);
+      ]);
+    });
 
     log.info(`[sendVideo] 已发送视频: ${basename(videoPath)}`);
   }
