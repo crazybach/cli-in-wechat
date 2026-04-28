@@ -65,18 +65,29 @@ export async function downloadMedia(
     throw new Error(`Failed to download media: HTTP ${response.status}`);
   }
   
-  let data: Uint8Array = new Uint8Array(await response.arrayBuffer());
-  
-  // 微信 CDN 下载的文件都是加密的，需要解密
-  // aes_key 存在时必须解密
-  if (aes_key) {
+  let data: Buffer = Buffer.from(await response.arrayBuffer());
+
+  // 微信 CDN 下行的媒体多为 AES-128-ECB 加密；c2c CDN 偶尔直返明文。
+  // 策略：原始字节若已是已知格式 → 直接保存；否则用 aes_key 做 ECB 解密；
+  // 解密结果再次校验 magic，校验失败说明 key/算法不对，宁可写原始字节也别写半解出的乱码。
+  const rawFmt = detectFileFormat(data);
+  if (rawFmt) {
+    log.debug(`[media] Raw response is already ${rawFmt} (${data.length} bytes), skipping decrypt`);
+  } else if (aes_key) {
     try {
-      data = decryptMedia(Buffer.from(data), aes_key);
-      log.debug(`[media] Decrypted ${data.length} bytes`);
+      const decrypted = decryptMedia(data, aes_key);
+      const decFmt = detectFileFormat(decrypted);
+      if (decFmt) {
+        data = decrypted;
+        log.debug(`[media] Decrypted to ${decFmt} (${decrypted.length} bytes)`);
+      } else {
+        log.warn(`[media] Decrypt produced unrecognized format, keeping raw bytes (file may be unviewable)`);
+      }
     } catch (err) {
-      log.warn(`[media] Decrypt failed, file may not be encrypted: ${err}`);
-      // 解密失败可能是因为文件本身未加密，继续使用原始数据
+      log.warn(`[media] Decrypt failed, keeping raw bytes (file may be unviewable): ${err}`);
     }
+  } else {
+    log.warn(`[media] No aes_key and unrecognized format, saving raw bytes (file may be unviewable)`);
   }
   
   const fileName = options.fileName || generateFileName(options.type);
@@ -148,25 +159,55 @@ function buildCdnUrl(encryptQueryParam: string): string {
 }
 
 function decryptMedia(data: Buffer, aesKeyBase64: string): Buffer {
+  // 上传端用 AES-128-ECB + PKCS#7（见 ilink/client.ts uploadToCdn → encryptAesEcb），
+  // 因此下载端只需 ECB 解密。原先的 CBC + 全零 IV 回退路径对 ECB 密文必然抛 bad_decrypt，
+  // 反而把已成功的 ECB 结果丢掉，是 #16 中文件无法查看的根因之一。
   const key = parseAesKey(aesKeyBase64);
-  
-  // 尝试 ECB 解密（微信 CDN 上传用的是 ECB）
-  try {
-    const decipherEcb = createDecipheriv('aes-128-ecb', key, null);
-    const decrypted = Buffer.concat([decipherEcb.update(data), decipherEcb.final()]);
-    // 检查解密结果是否像真实文件
-    const header = decrypted.slice(0, 4).toString('ascii');
-    if (header === '%PDF' || header === 'PK\x03\x04' || header.startsWith('\xd0\xcf') || header.startsWith('\x89PNG')) {
-      log.debug(`[media] ECB decryption successful, header: ${header}`);
-      return decrypted;
-    }
-  } catch {
-    // ECB 解密失败，尝试 CBC
-  }
-  
-  // 尝试 CBC 解密（IV 为全零）
-  const decipherCbc = createDecipheriv('aes-128-cbc', key, Buffer.alloc(16));
-  return Buffer.concat([decipherCbc.update(data), decipherCbc.final()]);
+  const decipher = createDecipheriv('aes-128-ecb', key, null);
+  return Buffer.concat([decipher.update(data), decipher.final()]);
+}
+
+/**
+ * Detect common media/document file formats by magic bytes.
+ * Returns the format name or null if unrecognized.
+ * Used to decide whether bytes need AES decryption and whether decryption succeeded.
+ */
+function detectFileFormat(data: Buffer): string | null {
+  if (data.length < 4) return null;
+  const b = data;
+
+  // JPEG: FF D8 FF
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg';
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'png';
+  // GIF: "GIF87a" / "GIF89a"
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'gif';
+  // BMP: "BM"
+  if (b[0] === 0x42 && b[1] === 0x4d) return 'bmp';
+  // WEBP: "RIFF"...."WEBP"
+  if (
+    b.length >= 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+  ) return 'webp';
+  // PDF: "%PDF"
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'pdf';
+  // ZIP / docx / xlsx / pptx: "PK\x03\x04"
+  if (b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04) return 'zip';
+  // Old MS Office (OLE2): D0 CF 11 E0
+  if (b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0) return 'ole';
+  // MP4 / MOV / 3GP: bytes 4..7 == "ftyp"
+  if (
+    b.length >= 12 &&
+    b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70
+  ) return 'mp4';
+  // MP3 (ID3 tag only — raw-frame sync `FF Ex` is too loose, would false-match
+  // garbage from a wrong AES key roughly 1 in 1024 times)
+  if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) return 'mp3';
+  // SILK voice (WeChat voice format): "\x02#!SILK"
+  if (b.length >= 7 && b[0] === 0x02 && b[1] === 0x23 && b[2] === 0x21 && b[3] === 0x53 && b[4] === 0x49 && b[5] === 0x4c && b[6] === 0x4b) return 'silk';
+
+  return null;
 }
 
 function generateFileName(type: 'image' | 'file' | 'video'): string {
