@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { log } from '../utils/logger.js';
@@ -44,6 +44,7 @@ interface CodexAccountSummary {
 interface CodexSessionSummary {
   id: string;
   path?: string;
+  cwd?: string;
 }
 
 interface CodexTokenUsage {
@@ -169,6 +170,29 @@ function sessionIdFromFileName(path: string): string {
   return basename(path, '.jsonl').replace(/^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/, '');
 }
 
+function readCodexSessionMeta(path: string): CodexSessionSummary | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const buffer = Buffer.allocUnsafe(8192);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const prefix = buffer.subarray(0, bytesRead).toString('utf8');
+    if (!/"type"\s*:\s*"session_meta"/.test(prefix)) return undefined;
+
+    const id = prefix.match(/"id"\s*:\s*"([^"]+)"/)?.[1];
+    if (!id) return undefined;
+
+    const cwd = prefix.match(/"cwd"\s*:\s*"([^"]*)"/)?.[1];
+    return { id, cwd, path };
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
 function listJsonlFilesRecursive(dir: string): string[] {
   try {
     return readdirSync(dir).flatMap((name) => {
@@ -182,9 +206,9 @@ function listJsonlFilesRecursive(dir: string): string[] {
   }
 }
 
-function findLatestCodexSession(): CodexSessionSummary | undefined {
+function findLatestCodexSession(workDir?: string, minMtime = 0): CodexSessionSummary | undefined {
   const baseDir = join(getCodexHome(), 'sessions');
-  const latest = listJsonlFilesRecursive(baseDir)
+  const candidates = listJsonlFilesRecursive(baseDir)
     .map((path) => {
       try {
         return { path, mtime: statSync(path).mtime.getTime() };
@@ -192,9 +216,16 @@ function findLatestCodexSession(): CodexSessionSummary | undefined {
         return { path, mtime: 0 };
       }
     })
-    .sort((a, b) => b.mtime - a.mtime)[0];
+    .filter(({ mtime }) => mtime >= minMtime)
+    .sort((a, b) => b.mtime - a.mtime);
 
-  return latest ? { id: sessionIdFromFileName(latest.path), path: latest.path } : undefined;
+  for (const candidate of candidates) {
+    const meta = readCodexSessionMeta(candidate.path);
+    if (workDir && meta?.cwd !== workDir) continue;
+    return meta || { id: sessionIdFromFileName(candidate.path), path: candidate.path };
+  }
+
+  return undefined;
 }
 
 function readLatestTokenSnapshot(path?: string): CodexTokenSnapshot | undefined {
@@ -284,10 +315,13 @@ export class CodexAdapter implements CLIAdapter {
     const version = await this.getCliVersion(opts.timeout);
     const account = readCodexAccount();
     const configuredSession = settings.sessionIds[this.name];
-    const latestSession = configuredSession && configuredSession !== 'last'
-      ? { id: configuredSession }
-      : findLatestCodexSession();
-    const tokenSnapshot = readLatestTokenSnapshot(latestSession?.path);
+    const latestSession = configuredSession
+      ? configuredSession === 'last'
+        ? findLatestCodexSession(workDir)
+        : { id: configuredSession }
+      : undefined;
+    const tokenSnapshotSession = latestSession?.path ? latestSession : findLatestCodexSession(workDir);
+    const tokenSnapshot = readLatestTokenSnapshot(tokenSnapshotSession?.path);
     const sessionLabel = latestSession?.id || configuredSession || 'none';
     const sessionPath = latestSession?.path ? `\nSession file: ${latestSession.path}` : '';
 
@@ -320,9 +354,12 @@ export class CodexAdapter implements CLIAdapter {
       const fullPrompt = buildMediaPrompt(prompt, opts.media, workDir);
       const args: string[] = [];
       const hasSession = settings.sessionIds[this.name];
+      const startedAt = Date.now();
 
       if (hasSession) {
-        args.push('exec', 'resume', '--last');
+        args.push('exec', 'resume');
+        if (hasSession === 'last') args.push('--last');
+        else args.push(hasSession);
       } else {
         args.push('exec');
 
@@ -357,7 +394,7 @@ export class CodexAdapter implements CLIAdapter {
 
       log.debug(`[codex] mode=${settings.mode} sandbox=${settings.sandbox || 'yolo'} search=${settings.search}`);
       const proc = spawnProc(this.command, args, {
-        cwd: opts.workDir, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env },
+        cwd: workDir, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env },
       });
 
       // Pass prompt via stdin to avoid Windows cmd.exe Unicode encoding issues
@@ -375,8 +412,15 @@ export class CodexAdapter implements CLIAdapter {
         if (timer) clearTimeout(timer);
         if (opts.signal?.aborted) { resolve({ text: '已取消', error: true }); return; }
         const text = stripAnsi(stdout.trim() || stderr.trim()) || `exit ${code}`;
-        // Mark session exists so next call uses --last to resume
-        resolve({ text, sessionId: code === 0 ? 'last' : undefined, error: code !== 0, sessionExpired: code !== 0 && !!hasSession && isSessionError(text) });
+        const createdSession = !hasSession && code === 0
+          ? findLatestCodexSession(workDir, startedAt - 1000)
+          : undefined;
+        resolve({
+          text,
+          sessionId: code === 0 ? (createdSession?.id || hasSession || 'last') : undefined,
+          error: code !== 0,
+          sessionExpired: code !== 0 && !!hasSession && isSessionError(text),
+        });
       });
       proc.on('error', (err) => {
         if (timer) clearTimeout(timer);

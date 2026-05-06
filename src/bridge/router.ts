@@ -71,6 +71,20 @@ export class Router {
     return this.sessions.get(uid).defaultTool || this.config.defaultTool;
   }
 
+  private parseOptionalToolPrefix(arg: string, fallbackTool: string): { tool: string; prompt: string; unknownTool?: string } {
+    const trimmed = arg.trim();
+    if (!trimmed) return { tool: fallbackTool, prompt: '' };
+
+    const match = trimmed.match(/^@?(\w+)(?:\s+([\s\S]*))?$/);
+    if (!match) return { tool: fallbackTool, prompt: trimmed };
+
+    const hasExplicitAt = trimmed.startsWith('@');
+    const alias = TOOL_ALIASES[match[1].toLowerCase()];
+    if (alias) return { tool: alias, prompt: (match[2] || '').trim() };
+    if (hasExplicitAt) return { tool: fallbackTool, prompt: '', unknownTool: match[1] };
+    return { tool: fallbackTool, prompt: trimmed };
+  }
+
   private getDefaultMsgMode(): MsgMode {
     return this.normalizeMsgMode(DEFAULT_SETTINGS.msgMode);
   }
@@ -332,7 +346,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           '/send <文件路径>  发送文件到微信',
           '',
           '— 会话 —',
-          '/new  新会话',
+          '/new [@工具] [提示]  新会话',
           '/clear  清除所有',
           '/cancel  取消任务',
           '/fork  分支当前会话',
@@ -368,10 +382,35 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
         return true;
       }
 
-      case 'new': case 'n':
-        this.sessions.clearSession(uid);
-        await reply('新会话');
+      case 'new': case 'n': {
+        const fallbackTool = settings.defaultTool || this.config.defaultTool;
+        const parsed = this.parseOptionalToolPrefix(arg, fallbackTool);
+        if (parsed.unknownTool) {
+          await reply(`未知终端: @${parsed.unknownTool}\n可用: ${Object.keys(TOOL_ALIASES).join(', ')}`);
+          return true;
+        }
+        if (!this.registry.isAvailable(parsed.tool)) {
+          await reply(`"${parsed.tool}" 不可用\n可用: ${this.registry.getAvailableNames().join(', ')}`);
+          return true;
+        }
+        if (this.active.has(`${uid}:${parsed.tool}`)) {
+          await reply(`${parsed.tool} 在忙，请先 /cancel`);
+          return true;
+        }
+
+        this.sessions.clearSession(uid, parsed.tool);
+        this.sessions.update(uid, { defaultTool: parsed.tool });
+        this.lastResponse.delete(uid);
+
+        if (!parsed.prompt) {
+          await reply(`${parsed.tool} 新会话已准备好，下条消息将创建新的 CLI session`);
+          return true;
+        }
+
+        await reply(`${parsed.tool} 新会话已开始`);
+        await this.exec(uid, parsed.tool, parsed.prompt);
         return true;
+      }
 
       case 'cancel': case 'c': {
         const tasks = [...this.active.entries()].filter(([k]) => k.startsWith(`${uid}:`));
@@ -980,16 +1019,22 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           for (const day of days) {
             const dayDir = join(baseDir, year, month, day);
             const files = readdirSync(dayDir).filter(f => f.endsWith('.jsonl'));
-            for (const f of files) {
+          for (const f of files) {
+            try {
+              const fullPath = join(dayDir, f);
+              const stat = statSync(fullPath);
+              let id = f.replace('.jsonl', '').replace(/^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/, '');
               try {
-                const stat = statSync(join(dayDir, f));
-                const id = f.replace('.jsonl', '').replace('rollout-', '').substring(0, 40);
-                results.push({
-                  id: 'last', // codex uses --last for resume
-                  date: `${year}-${month}-${day}`,
-                  summary: f.replace('.jsonl', '').substring(0, 50),
-                  mtime: stat.mtime.getTime(),
-                });
+                const firstLine = readFileSync(fullPath, 'utf-8').split('\n')[0];
+                const meta = JSON.parse(firstLine);
+                if (meta.type === 'session_meta' && meta.payload?.id) id = meta.payload.id;
+              } catch { /* keep filename-derived id */ }
+              results.push({
+                id,
+                date: `${year}-${month}-${day}`,
+                summary: f.replace('.jsonl', '').substring(0, 50),
+                mtime: stat.mtime.getTime(),
+              });
               } catch { continue; }
             }
           }

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { Router } from '../src/bridge/router.js';
 import type { BridgeConfig } from '../src/config.js';
@@ -39,7 +42,11 @@ function createRouter() {
     },
     update: (uid: string, partial: { defaultTool?: string }) => Object.assign(sessions.get(uid), partial),
     setSession: () => {},
-    clearSession: () => {},
+    clearSession: (uid: string, tool?: string) => {
+      const settings = sessions.get(uid);
+      if (tool) delete settings.sessionIds[tool];
+      else settings.sessionIds = {};
+    },
   };
 
   const config: BridgeConfig = {
@@ -183,6 +190,38 @@ test('handleSlash /status delegates to Codex status when Codex is active', async
   assert.equal(messages[messages.length - 1]?.text, 'OpenAI Codex\nSession: abc123');
 });
 
+test('handleSlash /new without prompt clears only selected tool session', async () => {
+  const { router, sessions, messages } = createRouter();
+  const settings = sessions.get('u1') as any;
+  settings.defaultTool = 'codex';
+  settings.sessionIds = { codex: 'old-codex', gemini: 'old-gemini' };
+
+  await router.handleSlash('u1', '/new');
+
+  assert.deepEqual(settings.sessionIds, { gemini: 'old-gemini' });
+  assert.equal(settings.defaultTool, 'codex');
+  assert.equal(messages[messages.length - 1]?.text, 'codex 新会话已准备好，下条消息将创建新的 CLI session');
+});
+
+test('handleSlash /new with tool and prompt starts fresh execution', async () => {
+  const { router, sessions, messages } = createRouter();
+  const settings = sessions.get('u1') as any;
+  settings.defaultTool = 'gemini';
+  settings.sessionIds = { codex: 'old-codex', gemini: 'old-gemini' };
+
+  let captured: { uid: string; tool: string; prompt: string } | undefined;
+  router.exec = async (uid: string, tool: string, prompt: string) => {
+    captured = { uid, tool, prompt };
+  };
+
+  await router.handleSlash('u1', '/new @codex start clean');
+
+  assert.deepEqual(settings.sessionIds, { gemini: 'old-gemini' });
+  assert.equal(settings.defaultTool, 'codex');
+  assert.deepEqual(captured, { uid: 'u1', tool: 'codex', prompt: 'start clean' });
+  assert.equal(messages[messages.length - 1]?.text, 'codex 新会话已开始');
+});
+
 test('splitNormalActivityLines keeps single batch when within boundary', () => {
   const { router } = createRouter();
   const lines = [
@@ -224,6 +263,25 @@ test('sendNormalActivityBatches waits 5 seconds between oversized batches', asyn
   const activityMessages = messages.filter((m) => m.text.startsWith('Activity'));
   assert.ok(activityMessages.length > 1);
   assert.deepEqual(delays, Array(activityMessages.length - 1).fill(5000));
+});
+
+test('listCodexSessions returns concrete session ids from metadata', () => {
+  const { router } = createRouter();
+  const dir = mkdtempSync(join(tmpdir(), 'codex-sessions-'));
+  try {
+    const dayDir = join(dir, '2026', '05', '06');
+    mkdirSync(dayDir, { recursive: true });
+    writeFileSync(join(dayDir, 'rollout-2026-05-06T10-00-00-fallback.jsonl'), JSON.stringify({
+      type: 'session_meta',
+      payload: { id: 'real-session-id' },
+    }) + '\n');
+
+    const sessions = (router as any).listCodexSessions(dir);
+
+    assert.equal(sessions[0].id, 'real-session-id');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('exec sanitizes stale malformed model before adapter execution', async () => {
