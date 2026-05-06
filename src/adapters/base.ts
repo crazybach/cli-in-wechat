@@ -103,6 +103,12 @@ export interface ExecResult {
   sessionExpired?: boolean;
 }
 
+export interface StatusOptions {
+  settings: UserSettings;
+  workDir?: string;
+  timeout?: number;
+}
+
 export interface IntermediateMessage {
   type: 'thinking' | 'text' | 'tool_use' | 'tool_result';
   content: string;
@@ -127,6 +133,7 @@ export interface CLIAdapter {
   readonly capabilities: AdapterCapabilities;
   isAvailable(): Promise<boolean>;
   execute(prompt: string, opts: ExecOptions): Promise<ExecResult>;
+  getStatus?(opts: StatusOptions): Promise<ExecResult>;
 }
 
 // ─── Shared process helpers ────────────────────────────────

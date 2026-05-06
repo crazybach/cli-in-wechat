@@ -167,6 +167,22 @@ test('handleSlash /model 默认 resets model only', async () => {
   assert.equal(messages[messages.length - 1]?.text, 'model → 默认');
 });
 
+test('handleSlash /status delegates to Codex status when Codex is active', async () => {
+  const { router, sessions, messages } = createRouter();
+  sessions.update('u1', { defaultTool: 'codex' });
+
+  router.registry.get = (name: string) => ({
+    name,
+    displayName: 'Codex',
+    capabilities: { sessionResume: true },
+    getStatus: async () => ({ text: 'OpenAI Codex\nSession: abc123' }),
+  });
+
+  await router.handleSlash('u1', '/status');
+
+  assert.equal(messages[messages.length - 1]?.text, 'OpenAI Codex\nSession: abc123');
+});
+
 test('splitNormalActivityLines keeps single batch when within boundary', () => {
   const { router } = createRouter();
   const lines = [

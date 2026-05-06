@@ -153,6 +153,32 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     return true;
   }
 
+  private buildBridgeStatus(uid: string): string {
+    const settings = this.sessions.get(uid);
+    const def = settings.defaultTool || this.config.defaultTool;
+    const currentMsgMode = this.normalizeMsgMode(settings.msgMode);
+    const defaultMsgMode = this.getDefaultMsgMode();
+    const sids = Object.entries(settings.sessionIds).map(([k, v]) => `${k}:${String(v).substring(0, 8)}`).join(' ') || '无';
+    const lines = [
+      `工具: ${def}`,
+      `模式: ${settings.mode}`,
+      `effort: ${settings.effort}`,
+      `model: ${settings.model || '默认'}`,
+      `turns: ${settings.maxTurns}`,
+      `budget: ${settings.maxBudget > 0 ? '$' + settings.maxBudget : '无限'}`,
+      `sandbox: ${settings.sandbox || '无'}`,
+      `search: ${settings.search ? 'ON' : 'OFF'}`,
+      `msgMode: ${currentMsgMode} (默认: ${defaultMsgMode})`,
+      `thoughts: ${settings.showThoughts ? 'ON' : 'OFF'}`,
+      `cliVerbose: ${settings.verbose ? 'ON' : 'OFF'} (Kimi)`,
+      `system: ${settings.systemPrompt ? settings.systemPrompt.substring(0, 40) + '...' : '无'}`,
+      `dir: ${settings.workDir || this.config.workDir}`,
+      `会话: ${sids}`,
+      `可用: ${this.registry.getAvailableNames().join(', ')}`,
+    ];
+    return lines.join('\n');
+  }
+
 
   private async handle(msg: WeixinMessage, text: string, refText: string, media?: DownloadedMedia[]): Promise<void> {
     const uid = msg.from_user_id;
@@ -326,28 +352,19 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
         return true;
 
       case 'status': case 'st': {
-        const def = settings.defaultTool || this.config.defaultTool;
-        const currentMsgMode = this.normalizeMsgMode(settings.msgMode);
-        const defaultMsgMode = this.getDefaultMsgMode();
-        const sids = Object.entries(settings.sessionIds).map(([k, v]) => `${k}:${String(v).substring(0, 8)}`).join(' ') || '无';
-        const lines = [
-          `工具: ${def}`,
-          `模式: ${settings.mode}`,
-          `effort: ${settings.effort}`,
-          `model: ${settings.model || '默认'}`,
-          `turns: ${settings.maxTurns}`,
-          `budget: ${settings.maxBudget > 0 ? '$' + settings.maxBudget : '无限'}`,
-          `sandbox: ${settings.sandbox || '无'}`,
-          `search: ${settings.search ? 'ON' : 'OFF'}`,
-          `msgMode: ${currentMsgMode} (默认: ${defaultMsgMode})`,
-          `thoughts: ${settings.showThoughts ? 'ON' : 'OFF'}`,
-          `cliVerbose: ${settings.verbose ? 'ON' : 'OFF'} (Kimi)`,
-          `system: ${settings.systemPrompt ? settings.systemPrompt.substring(0, 40) + '...' : '无'}`,
-          `dir: ${settings.workDir || this.config.workDir}`,
-          `会话: ${sids}`,
-          `可用: ${this.registry.getAvailableNames().join(', ')}`,
-        ];
-        await reply(lines.join('\n'));
+        const requestedTool = TOOL_ALIASES[arg.toLowerCase()];
+        const tool = requestedTool || settings.defaultTool || this.config.defaultTool;
+        const adapter = this.registry.get(tool);
+        if (adapter?.getStatus && this.registry.isAvailable(tool)) {
+          const status = await adapter.getStatus({
+            settings,
+            workDir: this.config.workDir,
+            timeout: Math.min(this.config.cliTimeout, 5000),
+          });
+          await reply(status.text);
+          return true;
+        }
+        await reply(this.buildBridgeStatus(uid));
         return true;
       }
 

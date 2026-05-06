@@ -122,7 +122,7 @@ Claude Code 需要你做选择时，问题自动转发到微信：
 
 | 命令 | 作用 | 工具 |
 |---|---|---|
-| `/status` | 查看所有配置 | 通用 |
+| `/status` | 查看配置；当前为 Codex 时显示 Codex 会话状态 | 通用/Codex |
 | `/model <名>` | 切模型 | 所有 |
 | `/mode <auto\|safe\|plan>` | 权限模式 | 所有 |
 | `/effort <low\|med\|high\|max>` | 思考深度 | Claude |
@@ -144,6 +144,15 @@ Claude Code 需要你做选择时，问题自动转发到微信：
 | `/approval <模式>` | 审批模式 | Gemini |
 | `/include <目录>` | 上下文目录 | Gemini |
 | `/ext <名>` | Extensions | Gemini |
+
+#### Codex `/status`
+
+当当前工具是 Codex（或使用 `/status codex`）时，微信会返回接近 Codex CLI `/status` 的会话状态：
+
+- Codex CLI 版本、模型与 reasoning 配置（支持当前 `/profile`）
+- 工作目录、权限模式、AGENTS.md、账号摘要、Session ID
+- Context Window、5h limit、Weekly limit（来自最近一次 Codex token/rate-limit 快照）
+- Search、Ephemeral、Profile 开关状态
 
 ### 操作
 
