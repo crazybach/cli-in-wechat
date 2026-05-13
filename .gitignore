@@ -1,5 +1,9 @@
 node_modules/
 dist/
+projects/
+output/
+tmp/
+.wx-media/
 *.js.map
 *.d.ts.map
 

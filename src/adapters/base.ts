@@ -1,4 +1,6 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { extname } from 'node:path';
 import { log } from '../utils/logger.js';
 import type { DownloadedMedia } from '../utils/media.js';
 
@@ -139,16 +141,87 @@ export interface CLIAdapter {
 // ─── Shared process helpers ────────────────────────────────
 export const WIN = process.platform === 'win32';
 
-/** On Windows, npm CLI wrappers (.cmd files) require shell:true to be executed by cmd.exe.
- *  This is the same mechanism npm scripts rely on and is the only reliable approach.
- *  Limitation: %VAR% patterns in user-supplied args may be expanded by cmd.exe. */
+function pathEntries(env?: NodeJS.ProcessEnv): string[] {
+  const pathValues = [env?.PATH, env?.Path, process.env.PATH, process.env.Path]
+    .filter((value): value is string => !!value);
+  return [...new Set(pathValues.flatMap((value) => value.split(';').filter(Boolean)))];
+}
+
+function pathExts(env?: NodeJS.ProcessEnv): string[] {
+  return (env?.PATHEXT ?? process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .filter(Boolean);
+}
+
+function preferWindowsWrapper(candidates: string[]): string | undefined {
+  return candidates.find((candidate) => ['.cmd', '.bat'].includes(extname(candidate).toLowerCase()))
+    || candidates.find(Boolean);
+}
+
+function resolveWindowsPathCommand(cmd: string, env?: NodeJS.ProcessEnv): string {
+  if (extname(cmd)) return cmd;
+
+  const siblingCandidates = pathExts(env).map((ext) => `${cmd}${ext}`);
+  return preferWindowsWrapper(siblingCandidates.filter((candidate) => existsSync(candidate))) || cmd;
+}
+
+function locateWindowsCommand(cmd: string, env?: NodeJS.ProcessEnv): string {
+  if (/[\\/]/.test(cmd)) return resolveWindowsPathCommand(cmd, env);
+
+  const where = spawnSync('where.exe', [cmd], {
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+    windowsHide: true,
+  });
+  const found = where.status === 0
+    ? preferWindowsWrapper(where.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))
+    : undefined;
+
+  if (found) return found;
+
+  // `where` is not guaranteed in stripped-down Windows environments.
+  const extensions = pathExts(env);
+  for (const dir of pathEntries(env)) {
+    for (const ext of extensions) {
+      const candidate = `${dir.replace(/[\\/]$/, '')}\\${cmd}${ext}`;
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+
+  return cmd;
+}
+
+function quoteForCmd(arg: string): string {
+  return `"${arg.replace(/"/g, '\\"')}"`;
+}
+
+/** Windows npm CLI wrappers are .cmd/.bat files. Run native binaries directly and
+ *  use cmd.exe only for wrappers so argument arrays do not go through shell:true. */
 export function spawnProc(cmd: string, args: string[], opts: import('node:child_process').SpawnOptions): ChildProcess {
   log.debug(`[spawn] ${cmd} ${args.map(a => JSON.stringify(a)).join(' ')}`);
   if (!WIN) return spawn(cmd, args, opts);
-  return spawn(cmd, args, { ...opts, shell: true });
+
+  const resolved = locateWindowsCommand(cmd, opts.env as NodeJS.ProcessEnv | undefined);
+  const ext = extname(resolved).toLowerCase();
+  if (ext === '.cmd' || ext === '.bat') {
+    const commandLine = `"${[resolved, ...args].map(quoteForCmd).join(' ')}"`;
+    return spawn('cmd.exe', ['/d', '/s', '/c', commandLine], {
+      ...opts,
+      shell: false,
+      windowsVerbatimArguments: true,
+      windowsHide: true,
+    });
+  }
+
+  return spawn(resolved, args, { ...opts, shell: false, windowsHide: true });
 }
 
 export function commandExists(cmd: string): Promise<boolean> {
+  if (WIN) {
+    const resolved = locateWindowsCommand(cmd);
+    return Promise.resolve(resolved !== cmd || /[\\/]/.test(cmd));
+  }
+
   const checker = WIN ? 'where' : 'which';
   return new Promise((resolve) => { const proc = spawn(checker, [cmd], { stdio: 'pipe' }); proc.on('close', (code) => resolve(code === 0)); proc.on('error', () => resolve(false)); });
 }

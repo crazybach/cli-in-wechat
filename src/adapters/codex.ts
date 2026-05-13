@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { log } from '../utils/logger.js';
 import type { CLIAdapter, ExecOptions, ExecResult, AdapterCapabilities, StatusOptions } from './base.js';
-import { commandExists, spawnProc, setupAbort, setupTimeout, stripAnsi, isSessionError } from './base.js';
+import { commandExists, spawnProc, setupAbort, setupTimeout, stripAnsi, isSessionError, WIN } from './base.js';
 import type { DownloadedMedia } from '../utils/media.js';
 import { copyMediaToWorkDir } from '../utils/media.js';
 
@@ -295,6 +295,10 @@ function formatPermissions(settings: StatusOptions['settings']): string {
   return 'Workspace (full-auto)';
 }
 
+function shouldBypassApprovalsAndSandbox(settings: ExecOptions['settings']): boolean {
+  return (settings.mode === 'auto' && !settings.sandbox) || (WIN && settings.sandbox === 'danger-full-access');
+}
+
 export class CodexAdapter implements CLIAdapter {
   readonly name = 'codex';
   readonly displayName = 'Codex CLI';
@@ -358,13 +362,21 @@ export class CodexAdapter implements CLIAdapter {
 
       if (hasSession) {
         args.push('exec', 'resume');
+        if (WIN) {
+          args.push('--skip-git-repo-check');
+          if (shouldBypassApprovalsAndSandbox(settings)) {
+            args.push('--dangerously-bypass-approvals-and-sandbox');
+          }
+        }
+        if (settings.model) args.push('-m', settings.model);
+        if (settings.ephemeral) args.push('--ephemeral');
         if (hasSession === 'last') args.push('--last');
         else args.push(hasSession);
       } else {
         args.push('exec');
 
         // Mode / sandbox
-        if (settings.mode === 'auto' && !settings.sandbox) {
+        if (shouldBypassApprovalsAndSandbox(settings)) {
           args.push('--dangerously-bypass-approvals-and-sandbox');
         } else if (settings.sandbox) {
           args.push('--sandbox', settings.sandbox);

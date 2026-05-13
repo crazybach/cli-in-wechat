@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import { CodexAdapter, readCodexConfig } from '../src/adapters/codex.js';
 import { DEFAULT_SETTINGS } from '../src/adapters/base.js';
@@ -122,5 +122,42 @@ test('Codex status resolves last only when bridge explicitly stores last', async
     if (oldHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = oldHome;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex resume preserves auto-mode bypass flags', { skip: process.platform !== 'win32' }, async () => {
+  const oldPath = process.env.PATH;
+  const binDir = mkdtempSync(join(tmpdir(), 'codex-resume-bin-'));
+  const workDir = mkdtempSync(join(tmpdir(), 'codex-resume-work-'));
+  const argsFile = join(binDir, 'args.txt');
+  const escapedArgsFile = argsFile.replace(/%/g, '%%');
+
+  try {
+    writeFileSync(join(binDir, 'codex.cmd'), [
+      '@echo off',
+      `echo %*>"${escapedArgsFile}"`,
+      'more > nul',
+      'echo ok',
+      '',
+    ].join('\r\n'));
+    process.env.PATH = `${binDir}${delimiter}${oldPath || ''}`;
+
+    const adapter = new CodexAdapter();
+    const result = await adapter.execute('get news from news.google.com', {
+      settings: { ...DEFAULT_SETTINGS, sessionIds: { codex: 'resume-id' } },
+      workDir,
+      timeout: 5000,
+    });
+
+    assert.equal(result.error, false);
+    assert.equal(
+      readFileSync(argsFile, 'utf8').trim(),
+      '"exec" "resume" "--skip-git-repo-check" "--dangerously-bypass-approvals-and-sandbox" "resume-id"',
+    );
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    rmSync(binDir, { recursive: true, force: true });
+    rmSync(workDir, { recursive: true, force: true });
   }
 });
