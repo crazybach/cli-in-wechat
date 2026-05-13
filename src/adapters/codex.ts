@@ -170,26 +170,68 @@ function sessionIdFromFileName(path: string): string {
   return basename(path, '.jsonl').replace(/^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/, '');
 }
 
-function readCodexSessionMeta(path: string): CodexSessionSummary | undefined {
+function readFirstLine(path: string, maxBytes = 1024 * 1024): string {
   let fd: number | undefined;
   try {
     fd = openSync(path, 'r');
-    const buffer = Buffer.allocUnsafe(8192);
-    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
-    const prefix = buffer.subarray(0, bytesRead).toString('utf8');
-    if (!/"type"\s*:\s*"session_meta"/.test(prefix)) return undefined;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let offset = 0;
 
-    const id = prefix.match(/"id"\s*:\s*"([^"]+)"/)?.[1];
-    if (!id) return undefined;
+    while (total < maxBytes) {
+      const buffer = Buffer.allocUnsafe(Math.min(8192, maxBytes - total));
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, offset);
+      if (bytesRead <= 0) break;
 
-    const cwd = prefix.match(/"cwd"\s*:\s*"([^"]*)"/)?.[1];
-    return { id, cwd, path };
+      const chunk = buffer.subarray(0, bytesRead);
+      const newline = chunk.indexOf(0x0a);
+      if (newline >= 0) {
+        chunks.push(chunk.subarray(0, newline));
+        break;
+      }
+
+      chunks.push(chunk);
+      total += bytesRead;
+      offset += bytesRead;
+    }
+
+    return Buffer.concat(chunks).toString('utf8').replace(/\r$/, '');
   } catch {
-    return undefined;
+    return '';
   } finally {
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* ignore */ }
     }
+  }
+}
+
+function readCodexSessionMeta(path: string): CodexSessionSummary | undefined {
+  try {
+    const firstLine = readFirstLine(path);
+    if (!firstLine) return undefined;
+    const obj = JSON.parse(firstLine) as {
+      type?: string;
+      payload?: { id?: unknown; cwd?: unknown };
+      id?: unknown;
+      cwd?: unknown;
+    };
+    if (obj.type !== 'session_meta') return undefined;
+
+    const id = typeof obj.payload?.id === 'string'
+      ? obj.payload.id
+      : typeof obj.id === 'string'
+        ? obj.id
+        : undefined;
+    if (!id) return undefined;
+
+    const cwd = typeof obj.payload?.cwd === 'string'
+      ? obj.payload.cwd
+      : typeof obj.cwd === 'string'
+        ? obj.cwd
+        : undefined;
+    return { id, cwd, path };
+  } catch {
+    return undefined;
   }
 }
 

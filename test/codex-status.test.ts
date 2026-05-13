@@ -125,6 +125,57 @@ test('Codex status resolves last only when bridge explicitly stores last', async
   }
 });
 
+test('Codex status matches Windows cwd from escaped session metadata', async () => {
+  const oldHome = process.env.CODEX_HOME;
+  const dir = mkdtempSync(join(tmpdir(), 'codex-home-'));
+  const workDir = 'C:\\Users\\maji\\workspace\\cli-in-wechat';
+  try {
+    const sessionDir = join(dir, 'sessions', '2026', '05', '13');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'rollout-2026-05-13T10-00-00-win.jsonl'), JSON.stringify({
+      timestamp: '2026-05-13T10:00:00.000Z',
+      type: 'session_meta',
+      payload: {
+        id: 'win-session',
+        cwd: workDir,
+        base_instructions: { text: 'x'.repeat(10_000) },
+      },
+    }) + '\n' + JSON.stringify({
+      timestamp: '2026-05-13T10:01:00.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          last_token_usage: { total_tokens: 500 },
+          model_context_window: 2000,
+        },
+        rate_limits: {
+          primary: { used_percent: 10, resets_at: 1778058000 },
+          secondary: { used_percent: 20, resets_at: 1778068000 },
+        },
+      },
+    }) + '\n');
+    writeFileSync(join(dir, 'config.toml'), '');
+    process.env.CODEX_HOME = dir;
+
+    const adapter = new CodexAdapter();
+    const status = await adapter.getStatus({
+      settings: { ...DEFAULT_SETTINGS, sessionIds: {} },
+      workDir,
+      timeout: 100,
+    });
+
+    assert.match(status.text, /Session: none/);
+    assert.match(status.text, /Context Window: 500 \/ 2,000 tokens \(75% left\)/);
+    assert.match(status.text, /5h limit: 90% left/);
+    assert.match(status.text, /Weekly limit: 80% left/);
+  } finally {
+    if (oldHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Codex resume preserves auto-mode bypass flags', { skip: process.platform !== 'win32' }, async () => {
   const oldPath = process.env.PATH;
   const binDir = mkdtempSync(join(tmpdir(), 'codex-resume-bin-'));
